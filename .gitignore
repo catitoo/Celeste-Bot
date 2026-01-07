@@ -1,0 +1,19 @@
+# Arquivos de configuração sensíveis
+# .env
+
+# Pasta de banco de dados e seus arquivos internos
+# database/
+
+# Ambiente virtual
+venv/
+
+# Arquivos de cache do Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+
+.env
