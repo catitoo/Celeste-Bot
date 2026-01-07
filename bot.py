@@ -12,7 +12,7 @@ async def carregar_cogs():
 # bot iniciou
 @bot.event
 async def on_ready():
-    print(f'{bot.user} pronto para a extração!')
+    print(f'{bot.user} funcionando!')
 
     try:
         await carregar_cogs()  # Carrega os cogs
