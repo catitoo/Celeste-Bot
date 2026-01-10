@@ -39,6 +39,7 @@ class GrupoView(discord.ui.View):
 
         return channel, False, "Apenas o líder da sala pode fazer isso."
 
+    # Editar nome da sala
     @discord.ui.button(emoji="<:Editar_Nome:1437591536463249448>", style=discord.ButtonStyle.secondary, custom_id="grupo_editar_nome")
     async def editar_nome(self, interaction: discord.Interaction, button: discord.ui.Button):
         import re
@@ -78,6 +79,7 @@ class GrupoView(discord.ui.View):
 
         await interaction.response.send_modal(RenomearModal())
 
+    # Convidar jogadores
     @discord.ui.button(emoji="<:Convidar_Jogadores:1437594789800312852>", style=discord.ButtonStyle.secondary, custom_id="grupo_convidar")
     async def convidar(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
@@ -86,6 +88,7 @@ class GrupoView(discord.ui.View):
             return
         await interaction.response.send_message("Função: Convidar Jogadores.", ephemeral=True)
 
+    # Remover membro
     @discord.ui.button(emoji="<:Remover_Membro:1437599768246222958>", style=discord.ButtonStyle.secondary, custom_id="grupo_remover")
     async def remover_membro(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
@@ -94,6 +97,7 @@ class GrupoView(discord.ui.View):
             return
         await interaction.response.send_message("Função: Remover Membro.", ephemeral=True)
 
+    # Trocar limite de membros
     @discord.ui.button(emoji="<:Trocar_Limite_Membro:1437601993404452874>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_limite")
     async def trocar_limite(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel, is_leader, err = self._verificar_lider(interaction)
@@ -138,30 +142,55 @@ class GrupoView(discord.ui.View):
 
         await interaction.response.send_modal(LimiteModal())
 
+    # Deletar chamada de voz
     @discord.ui.button(emoji="<:Deletar_Chamada:1437598183449690204>", style=discord.ButtonStyle.secondary, custom_id="grupo_deletar")
     async def deletar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            await interaction.response.send_message("Canal de voz deletado.", ephemeral=True)
+        except Exception:
+            pass
+
+        try:
+            criar_cog = interaction.client.get_cog("CriarGrupos")
+            if criar_cog and hasattr(criar_cog, "canais_criados"):
+                criar_cog.canais_criados.pop(channel.id, None)
+        except Exception:
+            pass
+
+        try:
+            await channel.delete(reason=f"Deletado pelo líder {interaction.user} (ID {interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send("Não tenho permissão para deletar este canal.", ephemeral=True)
+        except discord.HTTPException as e:
+            if getattr(e, "status", None) == 429:
+                await interaction.followup.send("Erro: rate limit do Discord. Tente novamente mais tarde.", ephemeral=True)
+            else:
+                await interaction.followup.send("Erro ao deletar o canal.", ephemeral=True)
+
+    # Ocultar chamada
+    @discord.ui.button(emoji="<:Bloquear_Chamada:1437593371869708459>", style=discord.ButtonStyle.secondary, custom_id="grupo_ocultar")
+    async def ocultar(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message("Função: Deletar Chamada.", ephemeral=True)
+        await interaction.response.send_message("Função: Ocultar Chamada.", ephemeral=True)
 
-    @discord.ui.button(emoji="<:Bloquear_Chamada:1437593371869708459>", style=discord.ButtonStyle.secondary, custom_id="grupo_bloquear")
-    async def bloquear(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # Revelar chamada
+    @discord.ui.button(emoji="<:Liberar_Chamada:1437593661285073006>", style=discord.ButtonStyle.secondary, custom_id="grupo_revelar")
+    async def revelar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message("Função: Bloquear Chamada.", ephemeral=True)
+        await interaction.response.send_message("Função: Revelar Chamada.", ephemeral=True)
 
-    @discord.ui.button(emoji="<:Liberar_Chamada:1437593661285073006>", style=discord.ButtonStyle.secondary, custom_id="grupo_liberar")
-    async def liberar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _, is_leader, err = self._verificar_lider(interaction)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
-            return
-        await interaction.response.send_message("Função: Liberar Chamada.", ephemeral=True)
-
+    # Assumir liderança
     @discord.ui.button(emoji="<:Assumir_Lideranca:1437592237763723476>", style=discord.ButtonStyle.secondary, custom_id="grupo_assumir")
     async def assumir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
@@ -170,6 +199,7 @@ class GrupoView(discord.ui.View):
             return
         await interaction.response.send_message("Função: Assumir Liderança.", ephemeral=True)
 
+    # Transferir liderança
     @discord.ui.button(emoji="<:Transferir_Lideranca:1437625407972315251>", style=discord.ButtonStyle.secondary, custom_id="grupo_transferir_lideranca")
     async def transferir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
@@ -178,6 +208,7 @@ class GrupoView(discord.ui.View):
             return
         await interaction.response.send_message("Função: Transferir Liderança.", ephemeral=True)
 
+    # Trocar região
     @discord.ui.button(emoji="<:Trocar_Regiao:1437606614910894120>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_regiao")
     async def trocar_regiao(self, interaction: discord.Interaction, button: discord.ui.Button):
         _, is_leader, err = self._verificar_lider(interaction)
