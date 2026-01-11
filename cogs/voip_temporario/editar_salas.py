@@ -4,6 +4,82 @@ import os
 from dotenv import load_dotenv, set_key
 load_dotenv()
 
+class RemoverMembrosSelect(discord.ui.UserSelect):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        # Visual “nativo” de seleção de usuários (bem parecido com o de cargos)
+        super().__init__(
+            placeholder="Selecione os usuários para remover da chamada…",
+            min_values=1,
+            max_values=25,  # limite do componente
+        )
+        self.channel_id = channel_id
+        self.leader_id = leader_id
+
+    async def callback(self, interaction: discord.Interaction):
+        # Segurança: só o líder que abriu consegue executar
+        if interaction.user.id != self.leader_id:
+            await interaction.response.send_message("Apenas quem abriu este menu pode usar.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Este menu só funciona dentro de um servidor.", ephemeral=True)
+            return
+
+        # Confirma que o líder ainda está na mesma sala
+        leader_member = guild.get_member(self.leader_id)
+        if not leader_member or not leader_member.voice or not leader_member.voice.channel:
+            await interaction.response.send_message("Você precisa estar em uma sala de voz para usar este menu.", ephemeral=True)
+            return
+        if leader_member.voice.channel.id != self.channel_id:
+            await interaction.response.send_message("Você não está mais na mesma sala onde abriu o menu.", ephemeral=True)
+            return
+
+        removidos: list[str] = []
+        ignorados: list[str] = []
+
+        # `self.values` tende a vir como Members em contexto de guild
+        for target in self.values:
+            if not isinstance(target, discord.Member):
+                target = guild.get_member(getattr(target, "id", None))
+
+            if not target or not target.voice or not target.voice.channel or target.voice.channel.id != self.channel_id:
+                if target:
+                    ignorados.append(target.display_name)
+                continue
+
+            # (Opcional) impedir remover a si mesmo
+            if target.id == self.leader_id:
+                ignorados.append(target.display_name)
+                continue
+
+            try:
+                await target.move_to(None, reason=f"Removido da call por {interaction.user}")
+                removidos.append(target.display_name)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "Não tenho permissão para mover/desconectar membros (perm: **Mover Membros**).",
+                    ephemeral=True
+                )
+                return
+            except discord.HTTPException:
+                ignorados.append(target.display_name)
+
+        msg = []
+        if removidos:
+            msg.append("**Removidos da chamada:**\n- " + "\n- ".join(f"`{n}`" for n in removidos))
+        if ignorados:
+            msg.append("**Não foi possivel remover:**\n- " + "\n- ".join(f"`{n}`" for n in ignorados))
+
+        await interaction.response.send_message("\n\n".join(msg) if msg else "Nada para fazer.", ephemeral=True)
+
+
+class RemoverMembrosView(discord.ui.View):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(timeout=60)  # menu temporário
+        self.add_item(RemoverMembrosSelect(channel_id=channel_id, leader_id=leader_id))
+
+
 class GrupoView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -91,11 +167,17 @@ class GrupoView(discord.ui.View):
     # Remover membro
     @discord.ui.button(emoji="<:Remover_Membro:1437599768246222958>", style=discord.ButtonStyle.secondary, custom_id="grupo_remover")
     async def remover_membro(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _, is_leader, err = self._verificar_lider(interaction)
+        channel, is_leader, err = self._verificar_lider(interaction)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message("Função: Remover Membro.", ephemeral=True)
+
+        view = RemoverMembrosView(channel_id=channel.id, leader_id=interaction.user.id)
+        await interaction.response.send_message(
+            "Selecione abaixo quem você quer remover da chamada:",
+            view=view,
+            ephemeral=True
+        )
 
     # Trocar limite de membros
     @discord.ui.button(emoji="<:Trocar_Limite_Membro:1437601993404452874>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_limite")
