@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv, set_key
+from datetime import datetime, timedelta
 load_dotenv()
 
 class RemoverMembrosSelect(discord.ui.UserSelect):
@@ -78,6 +79,123 @@ class RemoverMembrosView(discord.ui.View):
     def __init__(self, *, channel_id: int, leader_id: int):
         super().__init__(timeout=60)  # menu temporário
         self.add_item(RemoverMembrosSelect(channel_id=channel_id, leader_id=leader_id))
+
+
+class ConvidarMembrosSelect(discord.ui.UserSelect):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(
+            placeholder="Selecione os usuários para convidar para a chamada…",
+            min_values=1,
+            max_values=25,
+        )
+        self.channel_id = channel_id
+        self.leader_id = leader_id
+
+    async def callback(self, interaction: discord.Interaction):
+        # Segurança: só o líder que abriu consegue executar
+        if interaction.user.id != self.leader_id:
+            await interaction.response.send_message("Apenas quem abriu este menu pode usar.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Este menu só funciona dentro de um servidor.", ephemeral=True)
+            return
+
+        leader_member = guild.get_member(self.leader_id)
+        if not leader_member or not leader_member.voice or not leader_member.voice.channel:
+            await interaction.response.send_message("Você precisa estar em uma sala de voz para usar este menu.", ephemeral=True)
+            return
+        if leader_member.voice.channel.id != self.channel_id:
+            await interaction.response.send_message("Você não está mais na mesma sala onde abriu o menu.", ephemeral=True)
+            return
+
+        channel = leader_member.voice.channel
+
+        # Cria um convite curto (10 min / 1 uso) para mandar por DM
+        try:
+            invite = await channel.create_invite(
+                max_age=600,
+                max_uses=1,
+                unique=True,
+                reason=f"Convite para call criado por {interaction.user} (ID {interaction.user.id})"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Não tenho permissão para criar convite neste canal (perm: **Criar Convite Instantâneo**).",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message("Não foi possível criar o convite agora. Tente novamente.", ephemeral=True)
+            return
+
+        enviados: list[str] = []
+        falharam: list[str] = []
+        ignorados: list[str] = []
+
+        for target in self.values:
+            if not isinstance(target, discord.Member):
+                target = guild.get_member(getattr(target, "id", None))
+
+            if not target:
+                continue
+
+            # Ignora bots e o próprio líder
+            if target.bot or target.id == self.leader_id:
+                ignorados.append(target.display_name)
+                continue
+
+            # (Opcional) ignorar quem já está na mesma call
+            if target.voice and target.voice.channel and target.voice.channel.id == self.channel_id:
+                ignorados.append(target.display_name)
+                continue
+
+            try:
+                now = discord.utils.utcnow()
+                now_br = datetime.utcnow() - timedelta(hours=3)  # UTC-3
+                footer_text = now_br.strftime("%d/%m/%Y  •  %H:%M:%S")
+
+                embed = discord.Embed(
+                    title="Convite para chamada de voz",
+                    description=(
+                        f"Você foi convidado(a) por `{interaction.user.display_name}` para entrar em:\n"
+                        f"Canal de voz: **{channel.name}**\n"
+                        f"Servidor: **{guild.name}**\n\n"
+                        "Clique no botão abaixo para entrar na chamada!\n"
+                    ),
+                    color=discord.Color.from_rgb(128, 0, 128),
+                )
+
+                embed.set_footer(
+                    text=footer_text,
+                    icon_url=(guild.icon.url if getattr(guild, "icon", None) else None)
+                )
+                view = discord.ui.View()
+                view.add_item(discord.ui.Button(label="Entrar na chamada", url=invite.url))
+                await target.send(embed=embed, view=view, delete_after=300)  # apaga em 5 minutos
+                enviados.append(target.display_name)
+            except discord.Forbidden:
+                # DM fechada / não aceita DMs do servidor
+                falharam.append(target.display_name)
+            except discord.HTTPException:
+                falharam.append(target.display_name)
+
+        partes = []
+        if enviados:
+            partes.append("**Convites enviados por DM:**\n- " + "\n- ".join(f"`{n}`" for n in enviados))
+        if falharam:
+            partes.append("**Não foi possível enviar DM (provavelmente DM fechada):**\n- " + "\n- ".join(f"`{n}`" for n in falharam))
+        if ignorados:
+            partes.append("**Ignorados:**\n- " + "\n- ".join(f"`{n}`" for n in ignorados))
+
+        await interaction.response.send_message("\n\n".join(partes) if partes else "Nada para fazer.", ephemeral=True)
+
+
+class ConvidarMembrosView(discord.ui.View):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(timeout=60)
+        self.add_item(ConvidarMembrosSelect(channel_id=channel_id, leader_id=leader_id))
 
 
 class GrupoView(discord.ui.View):
@@ -158,11 +276,17 @@ class GrupoView(discord.ui.View):
     # Convidar jogadores
     @discord.ui.button(emoji="<:Convidar_Jogadores:1437594789800312852>", style=discord.ButtonStyle.secondary, custom_id="grupo_convidar")
     async def convidar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _, is_leader, err = self._verificar_lider(interaction)
+        channel, is_leader, err = self._verificar_lider(interaction)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message("Função: Convidar Jogadores.", ephemeral=True)
+
+        view = ConvidarMembrosView(channel_id=channel.id, leader_id=interaction.user.id)
+        await interaction.response.send_message(
+            "Selecione abaixo quem você quer **convidar** para a chamada (o bot vai enviar DM com o link):",
+            view=view,
+            ephemeral=True
+        )
 
     # Remover membro
     @discord.ui.button(emoji="<:Remover_Membro:1437599768246222958>", style=discord.ButtonStyle.secondary, custom_id="grupo_remover")
