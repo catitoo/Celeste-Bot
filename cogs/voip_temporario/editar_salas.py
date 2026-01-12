@@ -493,11 +493,52 @@ class GrupoView(discord.ui.View):
     # Assumir liderança
     @discord.ui.button(emoji="<:Assumir_Lideranca:1437592237763723476>", style=discord.ButtonStyle.secondary, custom_id="grupo_assumir")
     async def assumir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _, is_leader, err = self._verificar_lider(interaction)
-        if err:
-            await interaction.response.send_message(err, ephemeral=True)
+        member = interaction.user
+        if not getattr(member, "voice", None) or not member.voice.channel:
+            await interaction.response.send_message("Você precisa estar em um canal de voz para fazer isso.", ephemeral=True)
             return
-        await interaction.response.send_message("Função: Assumir Liderança.", ephemeral=True)
+
+        channel = member.voice.channel
+
+        CATEGORIA_GRUPOS_ID = int(os.getenv('GRUPOS_CRIADOS_CATEGORY_ID') or 0)
+        CRIAR_SALA_ID = int(os.getenv('CRIAR_SALA_CHANNEL_ID') or 0)
+
+        if CRIAR_SALA_ID and channel.id == CRIAR_SALA_ID:
+            await interaction.response.send_message("Este canal não pode ser editado.", ephemeral=True)
+            return
+
+        if CATEGORIA_GRUPOS_ID:
+            if not getattr(channel, "category", None) or channel.category.id != CATEGORIA_GRUPOS_ID:
+                await interaction.response.send_message("Este menu só funciona para canais de voz temporarios.", ephemeral=True)
+                return
+
+        criar_cog = interaction.client.get_cog("CriarGrupos")
+        if not criar_cog:
+            await interaction.response.send_message("Módulo de criação de salas não encontrado.", ephemeral=True)
+            return
+
+        if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
+            criar_cog.canais_criados = {}
+
+        current_leader_id = criar_cog.canais_criados.get(channel.id)
+
+        if current_leader_id == member.id:
+            await interaction.response.send_message("Você já é o líder desta sala.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        leader_member = guild.get_member(current_leader_id) if current_leader_id else None
+
+        if leader_member and getattr(leader_member, "voice", None) and leader_member.voice.channel and leader_member.voice.channel.id == channel.id:
+            await interaction.response.send_message("**Você não pode assumir a liderança desta chamada.**  O líder atual ainda está presente na chamada. ", ephemeral=True)
+            return
+
+        criar_cog.canais_criados[channel.id] = member.id
+
+        try:
+            await interaction.response.send_message(f"Você agora é o líder desta chamada.", ephemeral=True)
+        except Exception:
+            pass
 
     # Transferir liderança
     @discord.ui.button(emoji="<:Transferir_Lideranca:1437625407972315251>", style=discord.ButtonStyle.secondary, custom_id="grupo_transferir_lideranca")
