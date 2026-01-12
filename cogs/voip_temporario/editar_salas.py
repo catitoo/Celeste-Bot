@@ -335,7 +335,8 @@ class GrupoView(discord.ui.View):
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        CHANNEL_NAME_MAX = 32
+        CHANNEL_NAME_MAX = 50
+        PREFIX = "📢・"
 
         class RenomearModal(discord.ui.Modal, title="Renomear Sala"):
             novo_nome = discord.ui.TextInput(
@@ -353,9 +354,17 @@ class GrupoView(discord.ui.View):
                 if not novo:
                     await modal_interaction.response.send_message("Nome inválido após sanitização.", ephemeral=True)
                     return
-                novo_trunc = novo[:CHANNEL_NAME_MAX]
+
+                max_part = CHANNEL_NAME_MAX - len(PREFIX)
+                if max_part <= 0:
+                    await modal_interaction.response.send_message("Erro de configuração: limite de nome inválido.", ephemeral=True)
+                    return
+
+                novo_trunc = novo[:max_part].strip()
+                nome_final = f"{PREFIX}{novo_trunc}"
+
                 try:
-                    await channel.edit(name=novo_trunc)
+                    await channel.edit(name=nome_final)
                     await modal_interaction.response.send_message(f"Nome da sala alterado para: `{novo_trunc}`", ephemeral=True)
                 except discord.Forbidden:
                     await modal_interaction.response.send_message("Você não tem permissão para renomear este canal.", ephemeral=True)

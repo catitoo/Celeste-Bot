@@ -1,27 +1,25 @@
 import discord
 from discord.ext import commands
 import os
-import re
 from dotenv import load_dotenv
 import asyncio
 load_dotenv()
+
+MAX_CHANNEL_NAME = 100
+PREFIX = "📢・Sala de "
+
+def _sanitize_nick(nick: str, max_len: int) -> str:
+    nick = nick.replace("\n", " ").replace("\r", " ")
+    nick = " ".join(nick.split())
+    if len(nick) > max_len:
+        return nick[: max_len - 1] + "…"
+    return nick
 
 class CriarGrupos(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.canais_criados = {}
         self._recently_moved = set()
-
-    def _proximo_indice(self, categoria: discord.CategoryChannel, prefixo: str) -> int:
-        usados = set()
-        for ch in categoria.voice_channels:
-            m = re.fullmatch(rf"{re.escape(prefixo)} #(\d+)", ch.name, flags=re.IGNORECASE)
-            if m:
-                usados.add(int(m.group(1)))
-        i = 1
-        while i in usados:
-            i += 1
-        return i
 
     async def _limpar_recentes(self, member_id):
         await asyncio.sleep(1)
@@ -52,7 +50,6 @@ class CriarGrupos(commands.Cog):
             return
 
         limite_usuarios = None
-        tipo_grupo = "Sala"
 
         categoria = self.bot.get_channel(CATEGORIA_GRUPOS_ID)
 
@@ -60,8 +57,9 @@ class CriarGrupos(commands.Cog):
             print(f"Erro: Categoria com ID {CATEGORIA_GRUPOS_ID} não encontrada")
             return
 
-        numero = self._proximo_indice(categoria, tipo_grupo)
-        nome_canal = f"{tipo_grupo} #{numero}"
+        apelido = getattr(member, "display_name", member.name)
+        apelido = _sanitize_nick(apelido, MAX_CHANNEL_NAME - len(PREFIX))
+        nome_canal = PREFIX + apelido
 
         try:
             novo_canal = await categoria.create_voice_channel(
@@ -87,7 +85,6 @@ class CriarGrupos(commands.Cog):
             )
             embed.set_image(url="https://example.com/sua_imagem.png")
 
-            # Importa a view dinamicamente (evita import circular)
             try:
                 from .editar_salas import GrupoView
             except Exception:
