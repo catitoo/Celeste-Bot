@@ -198,6 +198,100 @@ class ConvidarMembrosView(discord.ui.View):
         self.add_item(ConvidarMembrosSelect(channel_id=channel_id, leader_id=leader_id))
 
 
+class TransferirLiderSelect(discord.ui.UserSelect):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(
+            placeholder="Selecione o usuário para transferir a liderança…",
+            min_values=1,
+            max_values=1,
+        )
+        self.channel_id = channel_id
+        self.leader_id = leader_id
+
+    async def callback(self, interaction: discord.Interaction):
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
+
+        async def _reply(msg: str):
+            if deferred:
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+
+        # Segurança: só o líder que abriu consegue executar
+        if interaction.user.id != self.leader_id:
+            await _reply("Apenas quem abriu este menu pode usar.")
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await _reply("Este menu só funciona dentro de um servidor.")
+            return
+
+        leader_member = guild.get_member(self.leader_id)
+        if not leader_member or not getattr(leader_member, "voice", None) or not leader_member.voice.channel:
+            await _reply("Você precisa estar em uma sala de voz para usar este menu.")
+            return
+        if leader_member.voice.channel.id != self.channel_id:
+            await _reply("Você não está mais na mesma sala onde abriu o menu.")
+            return
+
+        target = self.values[0]
+        if not isinstance(target, discord.Member):
+            target = guild.get_member(getattr(target, "id", None))
+
+        if not target:
+            await _reply("**Erro ao transferir liderança:** Usuário inválido.")
+            return
+
+        if target.bot:
+            await _reply("**Erro ao transferir liderança:** Não é possível transferir liderança para um bot.")
+            return
+
+        if not getattr(target, "voice", None) or not target.voice.channel or target.voice.channel.id != self.channel_id:
+            await _reply("**Erro ao transferir liderança:** O usuário precisa estar presente na chamada para receber a liderança.")
+            return
+
+        if target.id == self.leader_id:
+            await _reply("**Erro ao transferir liderança:** Você já é o líder dessa sala.")
+            return
+
+        try:
+            criar_cog = interaction.client.get_cog("CriarGrupos")
+            if not criar_cog:
+                await _reply("Módulo de criação de salas não encontrado.")
+                return
+
+            if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
+                criar_cog.canais_criados = {}
+
+            criar_cog.canais_criados[self.channel_id] = target.id
+
+            # envia a confirmação primeiro
+            await _reply(f"**Liderança transferida** para `{target.display_name}`.")
+
+            # então tenta apagar a mensagem do menu (tratando casos deferred e non-deferred)
+            try:
+                if deferred:
+                    await interaction.delete_original_response()
+                else:
+                    if getattr(interaction, "message", None):
+                        await interaction.message.delete()
+            except Exception:
+                pass
+        except Exception:
+            await _reply("Erro ao transferir liderança. Tente novamente.")
+
+class TransferirLiderView(discord.ui.View):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(timeout=60)
+        self.add_item(TransferirLiderSelect(channel_id=channel_id, leader_id=leader_id))
+
+
 class GrupoView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -408,11 +502,17 @@ class GrupoView(discord.ui.View):
     # Transferir liderança
     @discord.ui.button(emoji="<:Transferir_Lideranca:1437625407972315251>", style=discord.ButtonStyle.secondary, custom_id="grupo_transferir_lideranca")
     async def transferir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _, is_leader, err = self._verificar_lider(interaction)
+        channel, is_leader, err = self._verificar_lider(interaction)
         if err:
             await interaction.response.send_message(err, ephemeral=True)
             return
-        await interaction.response.send_message("Função: Transferir Liderança.", ephemeral=True)
+
+        view = TransferirLiderView(channel_id=channel.id, leader_id=interaction.user.id)
+        await interaction.response.send_message(
+            "Selecione o usuário para transferir a liderança (o usuário precisa estar na chamada):",
+            view=view,
+            ephemeral=True
+        )
 
     # Trocar região
     @discord.ui.button(emoji="<:Trocar_Regiao:1437606614910894120>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_regiao")
