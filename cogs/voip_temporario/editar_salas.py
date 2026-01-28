@@ -74,20 +74,20 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
                 await interaction.response.send_message(msg, ephemeral=True)
 
         if interaction.user.id != self.leader_id:
-            await _reply("*ERRO:* Apenas quem abriu este menu pode usar.")
+            await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
             return
 
         guild = interaction.guild
         if not guild:
-            await _reply("*ERRO:* Este menu só funciona dentro de um servidor.")
+            await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
             return
 
         leader_member = guild.get_member(self.leader_id)
         if not leader_member or not leader_member.voice or not leader_member.voice.channel:
-            await _reply("*ERRO:* Você precisa estar em uma sala de voz para usar este menu.")
+            await _reply("**ERRO:** Você precisa estar em uma sala de voz para usar este menu.")
             return
         if leader_member.voice.channel.id != self.channel_id:
-            await _reply("*ERRO:* Você não está mais na mesma sala onde abriu o menu.")
+            await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
             return
 
         channel = leader_member.voice.channel
@@ -100,10 +100,10 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
                 reason=f"Convite para chamada criado por {interaction.user}"
             )
         except discord.Forbidden:
-            await _reply("*ERRO:* Não tenho permissão para criar convite neste canal.")
+            await _reply("**ERRO:** Não tenho permissão para criar convite neste canal.")
             return
         except discord.HTTPException:
-            await _reply("*ERRO:* Não foi possível criar o convite agora. Tente novamente.")
+            await _reply("**ERRO:** Não foi possível criar o convite agora. Tente novamente.")
             return
 
         enviados: list[str] = []
@@ -226,20 +226,20 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
                 await interaction.response.send_message(msg, ephemeral=True)
 
         if interaction.user.id != self.leader_id:
-            await _reply("*ERRO:* Apenas quem abriu este menu pode usar.")
+            await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
             return
 
         guild = interaction.guild
         if not guild:
-            await _reply("*ERRO:* Este menu só funciona dentro de um servidor.")
+            await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
             return
 
         leader_member = guild.get_member(self.leader_id)
         if not leader_member or not getattr(leader_member, "voice", None) or not leader_member.voice.channel:
-            await _reply("*ERRO:* Você precisa estar em uma sala de voz para usar este menu.")
+            await _reply("**ERRO:** Você precisa estar em uma sala de voz para usar este menu.")
             return
         if leader_member.voice.channel.id != self.channel_id:
-            await _reply("*ERRO:* Você não está mais na mesma sala onde abriu o menu.")
+            await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
             return
 
         removidos: list[str] = []
@@ -262,7 +262,7 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
                 await target.move_to(None, reason=f"Removido da call por {interaction.user}")
                 removidos.append(target.display_name)
             except discord.Forbidden:
-                await _reply("*ERRO:* Não tenho permissão para mover/desconectar membros.")
+                await _reply("**ERRO:** Não tenho permissão para mover/desconectar membros.")
                 return
             except discord.HTTPException:
                 ignorados.append(target.display_name)
@@ -285,15 +285,44 @@ class GrupoView(discord.ui.View):
     def __init__(self, *, timeout: float | None = None):
         super().__init__(timeout=timeout)
 
+    def _verificar_lider(self, interaction: discord.Interaction):
+        member = interaction.user
+        if not getattr(member, "voice", None) or not member.voice.channel:
+            return None, False, "**ERRO:** Você precisa estar em uma sala de voz para usar este botão."
+
+        channel = member.voice.channel
+
+        # Checa categoria e canal de criação (se configurados)
+        CATEGORIA_GRUPOS_ID = int(os.getenv('GRUPOS_CRIADOS_CATEGORY_ID') or 0)
+        CRIAR_SALA_ID = int(os.getenv('CRIAR_SALA_CHANNEL_ID') or 0)
+
+        if CRIAR_SALA_ID and channel.id == CRIAR_SALA_ID:
+            return channel, False, "**ERRO:** Este canal não pode ser editado."
+
+        if CATEGORIA_GRUPOS_ID:
+            if not getattr(channel, "category", None) or channel.category.id != CATEGORIA_GRUPOS_ID:
+                return channel, False, "**ERRO:** Este menu só funciona para canais de voz temporarios."
+
+        criar_cog = None
+        try:
+            criar_cog = interaction.client.get_cog("CriarGrupos")
+        except Exception:
+            criar_cog = None
+
+        if criar_cog and hasattr(criar_cog, "canais_criados"):
+            lider_id = criar_cog.canais_criados.get(channel.id)
+            if lider_id == member.id:
+                return channel, True, None
+
+        return channel, False, "**ERRO:** Apenas o líder da sala pode fazer isso."
+
     # EDITAR NOME
     @discord.ui.button(emoji="<:Editar_Nome:1437591536463249448>", style=discord.ButtonStyle.secondary, custom_id="grupo_editar_nome")
     async def editar_nome(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not getattr(member, "voice", None) or not member.voice.channel:
-            await interaction.response.send_message("*ERRO:* Você precisa estar em um canal de voz para usar este botão.", ephemeral=True)
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-
-        channel = member.voice.channel
         CHANNEL_NAME_MAX = 100
         PREFIX = "📢・"
 
@@ -311,12 +340,12 @@ class GrupoView(discord.ui.View):
                 novo = re.sub(r"[^\w\s\-\u00C0-\u017F]", "", novo_raw)
                 novo = re.sub(r"\s+", " ", novo).strip()
                 if not novo:
-                    await modal_interaction.response.send_message("*ERRO:* Nome inválido após sanitização.", ephemeral=True)
+                    await modal_interaction.response.send_message("**ERRO:** Nome inválido após sanitização.", ephemeral=True)
                     return
 
                 max_part = CHANNEL_NAME_MAX - len(PREFIX)
                 if max_part <= 0:
-                    await modal_interaction.response.send_message("**ERRO:** limite de nome inválido.", ephemeral=True)
+                    await modal_interaction.response.send_message("***ERRO:*** limite de nome inválido.", ephemeral=True)
                     return
 
                 novo_trunc = novo[:max_part].strip()
@@ -326,21 +355,19 @@ class GrupoView(discord.ui.View):
                     await channel.edit(name=nome_final)
                     await modal_interaction.response.send_message("**Nome da sala alterado para:** `{}`".format(novo_trunc), ephemeral=True)
                 except discord.Forbidden:
-                    await modal_interaction.response.send_message("*ERRO:* Não tenho permissão para renomear este canal.", ephemeral=True)
+                    await modal_interaction.response.send_message("**ERRO:** Não tenho permissão para renomear este canal.", ephemeral=True)
                 except discord.HTTPException:
-                    await modal_interaction.response.send_message("*ERRO:* Erro ao renomear a sala.", ephemeral=True)
+                    await modal_interaction.response.send_message("**ERRO:** Erro ao renomear a sala.", ephemeral=True)
 
         await interaction.response.send_modal(RenomearModal())
 
     # CONVIDAR USUARIOS
     @discord.ui.button(emoji="<:Convidar_Jogadores:1437594789800312852>", style=discord.ButtonStyle.secondary, custom_id="grupo_convidar")
     async def convidar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not getattr(member, "voice", None) or not member.voice.channel:
-            await interaction.response.send_message("*ERRO:* Você precisa estar em uma sala de voz para usar este botão.", ephemeral=True)
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-
-        channel = member.voice.channel
         view = ConvidarMembrosView(channel_id=channel.id, leader_id=interaction.user.id)
         await interaction.response.send_message(
             "Selecione abaixo quem você quer **convidar** para a chamada (o convite será enviado por DM):",
@@ -351,18 +378,91 @@ class GrupoView(discord.ui.View):
     # REMOVER USUARIOS
     @discord.ui.button(emoji="<:Remover_Membro:1437599768246222958>", style=discord.ButtonStyle.secondary, custom_id="grupo_remover")
     async def remover_membro(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not getattr(member, "voice", None) or not member.voice.channel:
-            await interaction.response.send_message("*ERRO:* Você precisa estar em uma sala de voz para usar este botão.", ephemeral=True)
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-
-        channel = member.voice.channel
         view = RemoverMembrosView(channel_id=channel.id, leader_id=interaction.user.id)
         await interaction.response.send_message(
             "Selecione abaixo quem você quer **remover** da chamada:",
             view=view,
             ephemeral=True
         )
+
+    # TROCAR LIMITE DE MEMBROS
+    @discord.ui.button(emoji="<:Trocar_Limite_Membro:1437601993404452874>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_limite")
+    async def trocar_limite(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        current_limit = getattr(channel, "user_limit", 0) or 0
+        placeholder = str(current_limit) if current_limit > 0 else "Sem limite"
+
+        class LimiteModal(discord.ui.Modal, title="Trocar limite de membros"):
+            limite = discord.ui.TextInput(
+                label="Novo limite (0–99 / 0 = sem limite)",
+                style=discord.TextStyle.short,
+                placeholder=placeholder,
+                max_length=2,
+                required=True
+            )
+
+            async def on_submit(self, modal_interaction: discord.Interaction):
+                val = self.limite.value.strip()
+                if not val.isdigit():
+                    await modal_interaction.response.send_message("**ERRO:** Informe um número entre 0 e 99.", ephemeral=True)
+                    return
+                num = int(val)
+                if num < 0 or num > 99:
+                    await modal_interaction.response.send_message("**ERRO:** Número inválido. Use um valor entre 0 e 99.", ephemeral=True)
+                    return
+                try:
+                    await channel.edit(user_limit=0 if num == 0 else num)
+                    if num == 0:
+                        await modal_interaction.response.send_message("Limite removido (sem limite).", ephemeral=True)
+                    else:
+                        await modal_interaction.response.send_message(f"Limite de membros alterado para: `{num}`", ephemeral=True)
+                except discord.Forbidden:
+                    await modal_interaction.response.send_message("**ERRO:** Não tenho permissão para alterar o limite deste canal.", ephemeral=True)
+                except discord.HTTPException as e:
+                    if getattr(e, "status", None) == 429:
+                        await modal_interaction.response.send_message("**ERRO:** Rate limit do Discord. Tente novamente mais tarde.", ephemeral=True)
+                    else:
+                        await modal_interaction.response.send_message("**ERRO:** Não foi possível alterar o limite do canal.", ephemeral=True)
+
+        await interaction.response.send_modal(LimiteModal())
+
+    # DELETAR CHAMADA DE VOZ
+    @discord.ui.button(emoji="<:Deletar_Chamada:1437598183449690204>", style=discord.ButtonStyle.secondary, custom_id="grupo_deletar")
+    async def deletar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            await interaction.response.send_message("Canal de voz deletado.", ephemeral=True)
+        except Exception:
+            pass
+
+        try:
+            criar_cog = interaction.client.get_cog("CriarGrupos")
+            if criar_cog and hasattr(criar_cog, "canais_criados"):
+                criar_cog.canais_criados.pop(channel.id, None)
+        except Exception:
+            pass
+
+        try:
+            await channel.delete(reason=f"Deletado pelo líder {interaction.user} (ID {interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send("**ERRO:** Não tenho permissão para deletar este canal.", ephemeral=True)
+        except discord.HTTPException as e:
+            if getattr(e, "status", None) == 429:
+                await interaction.followup.send("**ERRO:** Tente novamente mais tarde.", ephemeral=True)
+            else:
+                await interaction.followup.send("**ERRO:** Não foi possível deletar o canal.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EditarSalas(bot))
