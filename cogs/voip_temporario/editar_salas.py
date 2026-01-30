@@ -236,8 +236,57 @@ class EditarSalas(commands.Cog):
     def salvar_no_env(self, chave: str, valor):
         set_key(".env", chave, str(valor))
         os.environ[chave] = str(valor)
-    
-    @discord.app_commands.command(name="set-menu-editar-sala", description="Define o canal e envia a interface de edição da sala.")
+
+    # >>> ADICIONE ISTO AQUI (ANTES DO @discord.app_commands.command) <<<
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        # Esse listener serve para fazer os botões do Components(LayoutView)
+        # executarem os callbacks reais que estão na GrupoView.
+        try:
+            if interaction.type != discord.InteractionType.component:
+                return
+
+            data = getattr(interaction, "data", None) or {}
+            custom_id = data.get("custom_id")
+
+            if not isinstance(custom_id, str) or not custom_id.startswith("grupo_"):
+                return
+
+            # Se por algum motivo já foi respondida, não mexe
+            if interaction.response.is_done():
+                return
+
+            view = GrupoView(timeout=None)
+
+            # Procura o botão com esse custom_id dentro da GrupoView
+            for item in view.children:
+                if getattr(item, "custom_id", None) == custom_id:
+                    # item aqui é um discord.ui.Button; o código do botão está no callback dele.
+                    await item.callback(interaction)
+                    return
+
+            # Se chegou aqui, não encontrou o botão na GrupoView
+            await interaction.response.send_message(
+                f"**ERRO:** Botão `{custom_id}` não encontrado na GrupoView.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            # Agora você vai ver o erro em vez de “silenciar”
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"**ERRO interno ao processar botão:** `{type(e).__name__}: {e}`",
+                        ephemeral=True
+                    )
+            except Exception:
+                pass
+            raise  # importante: deixa aparecer no console/log do bot
+
+    @discord.app_commands.command(
+        name="set-menu-editar-sala",
+        description="Define o canal e envia a interface de edição da sala."
+    )
     async def set_menu_editar_sala_2(self, interaction: discord.Interaction):
         admin_role_id = int(os.getenv('ADMINISTRADOR_CARGO_ID') or 0)
         member = interaction.user
@@ -257,9 +306,9 @@ class EditarSalas(commands.Cog):
             ephemeral=True
         )
 
-        # Envia a view que contém callbacks (GrupoView) para que os botões funcionem corretamente.
+        # Envia o LayoutView (Components) para exibir o painel completo.
         try:
-            view = GrupoView()
+            view = Components()
             await interaction.channel.send(view=view)
         except Exception:
             try:
@@ -1214,5 +1263,9 @@ class GrupoView(discord.ui.View):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EditarSalas(bot))
-    bot.add_view(Components())
+
+    # RECOMENDADO: manter só a view com callbacks registrada como persistente
     bot.add_view(GrupoView())
+
+    # OPCIONAL/EVITAR: não registrar Components como view persistente
+    # bot.add_view(Components())
