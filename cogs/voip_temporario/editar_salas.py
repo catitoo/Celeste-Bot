@@ -69,26 +69,75 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
 
         async def _reply(msg: str):
             if deferred:
-                return await interaction.followup.send(msg, ephemeral=True)
+                try:
+                    m = await interaction.followup.send(msg, ephemeral=True)
+                    return m
+                except Exception:
+                    return None
             else:
-                await interaction.response.send_message(msg, ephemeral=True)
-                return None
+                try:
+                    await interaction.response.send_message(msg, ephemeral=True)
+                except Exception:
+                    pass
+                try:
+                    m = await interaction.original_response()
+                    return m
+                except Exception:
+                    return None
+
+        async def _try_delete_menu(sent_msg):
+            try:
+                msg = getattr(interaction, 'message', None)
+                if msg:
+                    try:
+                        await msg.delete()
+                        return
+                    except Exception:
+                        pass
+
+                try:
+                    orig = await interaction.original_response()
+                    if orig:
+                        try:
+                            await orig.delete()
+                            return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
+
+                if deferred and sent_msg:
+                    try:
+                        await sent_msg.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         if interaction.user.id != self.leader_id:
-            await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
+            sent = await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
+            await _try_delete_menu(sent)
             return
 
         guild = interaction.guild
         if not guild:
-            await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
+            sent = await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
+            await _try_delete_menu(sent)
             return
 
         leader_member = guild.get_member(self.leader_id)
         if not leader_member or not leader_member.voice or not leader_member.voice.channel:
-            await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
+            sent = await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
+            await _try_delete_menu(sent)
             return
         if leader_member.voice.channel.id != self.channel_id:
-            await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
+            sent = await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
+            await _try_delete_menu(sent)
             return
 
         channel = leader_member.voice.channel
@@ -101,10 +150,12 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
                 reason=f"Convite para chamada criado por {interaction.user}"
             )
         except discord.Forbidden:
-            await _reply("**ERRO:** Não tenho permissão para criar convite neste canal.")
+            sent = await _reply("**ERRO:** Não tenho permissão para criar convite neste canal.")
+            await _try_delete_menu(sent)
             return
         except discord.HTTPException:
-            await _reply("**ERRO:** Não foi possível criar o convite agora. Tente novamente.")
+            sent = await _reply("**ERRO:** Não foi possível criar o convite agora. Tente novamente.")
+            await _try_delete_menu(sent)
             return
 
         enviados: list[str] = []
@@ -170,7 +221,8 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
         if ignorados:
             partes.append("**Ignorados:**\n- " + "\n- ".join(f"`{n}`" for n in ignorados))
 
-        await _reply("\n\n".join(partes) if partes else "Nada para fazer.")
+        sent = await _reply("\n\n".join(partes) if partes else "Nada para fazer.")
+        await _try_delete_menu(sent)
 
 class ConvidarMembrosView(discord.ui.View):
     def __init__(self, *, channel_id: int, leader_id: int):
@@ -235,25 +287,75 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
 
         async def _reply(msg: str):
             if deferred:
-                await interaction.followup.send(msg, ephemeral=True)
+                try:
+                    m = await interaction.followup.send(msg, ephemeral=True)
+                    return m
+                except Exception:
+                    return None
             else:
-                await interaction.response.send_message(msg, ephemeral=True)
+                try:
+                    await interaction.response.send_message(msg, ephemeral=True)
+                except Exception:
+                    pass
+                try:
+                    m = await interaction.original_response()
+                    return m
+                except Exception:
+                    return None
+
+        async def _try_delete_menu(sent_msg):
+            try:
+                msg = getattr(interaction, 'message', None)
+                if msg:
+                    try:
+                        await msg.delete()
+                        return
+                    except Exception:
+                        pass
+
+                try:
+                    orig = await interaction.original_response()
+                    if orig:
+                        try:
+                            await orig.delete()
+                            return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
+
+                if deferred and sent_msg:
+                    try:
+                        await sent_msg.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         if interaction.user.id != self.leader_id:
-            await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
+            sent = await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
+            await _try_delete_menu(sent)
             return
 
         guild = interaction.guild
         if not guild:
-            await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
+            sent = await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
+            await _try_delete_menu(sent)
             return
 
         leader_member = guild.get_member(self.leader_id)
         if not leader_member or not getattr(leader_member, "voice", None) or not leader_member.voice.channel:
-            await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
+            sent = await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
+            await _try_delete_menu(sent)
             return
         if leader_member.voice.channel.id != self.channel_id:
-            await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
+            sent = await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
+            await _try_delete_menu(sent)
             return
 
         channel = leader_member.voice.channel
@@ -288,7 +390,8 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
                 except Exception:
                     pass
             except discord.Forbidden:
-                await _reply("**ERRO:** Não tenho permissão para mover/desconectar membros.")
+                sent = await _reply("**ERRO:** Não tenho permissão para mover/desconectar membros.")
+                await _try_delete_menu(sent)
                 return
             except discord.HTTPException:
                 ignorados.append(target.display_name)
@@ -299,7 +402,8 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
         if ignorados:
             partes.append("**Não foi possivel remover:**\n- " + "\n- ".join(f"`{n}`" for n in ignorados))
 
-        await _reply("\n\n".join(partes) if partes else "Nada para fazer.")
+        sent = await _reply("\n\n".join(partes) if partes else "Nada para fazer.")
+        await _try_delete_menu(sent)
 
 
 class RemoverMembrosView(discord.ui.View):
@@ -328,9 +432,55 @@ class TransferirLiderSelect(discord.ui.UserSelect):
 
         async def _reply(msg: str):
             if deferred:
-                await interaction.followup.send(msg, ephemeral=True)
+                try:
+                    m = await interaction.followup.send(msg, ephemeral=True)
+                    return m
+                except Exception:
+                    return None
             else:
-                await interaction.response.send_message(msg, ephemeral=True)
+                try:
+                    await interaction.response.send_message(msg, ephemeral=True)
+                except Exception:
+                    pass
+                try:
+                    m = await interaction.original_response()
+                    return m
+                except Exception:
+                    return None
+
+        async def _try_delete_menu(sent_msg):
+            try:
+                msg = getattr(interaction, 'message', None)
+                if msg:
+                    try:
+                        await msg.delete()
+                        return
+                    except Exception:
+                        pass
+
+                try:
+                    orig = await interaction.original_response()
+                    if orig:
+                        try:
+                            await orig.delete()
+                            return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
+
+                if deferred and sent_msg:
+                    try:
+                        await sent_msg.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         if interaction.user.id != self.leader_id:
             await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
@@ -355,19 +505,23 @@ class TransferirLiderSelect(discord.ui.UserSelect):
             target = guild.get_member(getattr(target, "id", None))
 
         if not target:
-            await _reply("**ERRO:** Usuário inválido selecionado.")
+            sent = await _reply("**ERRO:** Usuário inválido selecionado.")
+            await _try_delete_menu(sent)
             return
 
         if target.bot:
-            await _reply("**ERRO:** Não é possível transferir liderança para um bot.")
+            sent = await _reply("**ERRO:** Não é possível transferir liderança para um bot.")
+            await _try_delete_menu(sent)
             return
 
         if target.id == self.leader_id:
-            await _reply("**ERRO:** Você já é o líder desta sala.")
+            sent = await _reply("**ERRO:** Você já é o líder desta sala.")
+            await _try_delete_menu(sent)
             return
 
         if not getattr(target, "voice", None) or not target.voice.channel or target.voice.channel.id != self.channel_id:
-            await _reply("**ERRO:** O usuário precisa estar na chamada para receber a liderança.")
+            sent = await _reply("**ERRO:** O usuário precisa estar na chamada para receber a liderança.")
+            await _try_delete_menu(sent)
             return
 
         try:
@@ -376,7 +530,8 @@ class TransferirLiderSelect(discord.ui.UserSelect):
             criar_cog = None
 
         if not criar_cog:
-            await _reply("**ERRO:** Módulo de criação de salas não encontrado.")
+            sent = await _reply("**ERRO:** Módulo de criação de salas não encontrado.")
+            await _try_delete_menu(sent)
             return
 
         if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
@@ -384,15 +539,18 @@ class TransferirLiderSelect(discord.ui.UserSelect):
 
         # transfere a liderança
         criar_cog.canais_criados[self.channel_id] = target.id
+        sent = await _reply(f"**Liderança transferida**, agora `{target.display_name}` é o novo líder deste canal de voz.")
 
-        await _reply(f"**Liderança transferida**, agora `{target.display_name}` é o novo líder deste canal de voz.")
-
+        # Tentar apagar/esconder apenas o menu que continha os componentes
+        try:
+            await _try_delete_menu(None)
+        except Exception:
+            pass
 
 class TransferirLiderView(discord.ui.View):
     def __init__(self, *, channel_id: int, leader_id: int):
         super().__init__(timeout=60)
         self.add_item(TransferirLiderSelect(channel_id=channel_id, leader_id=leader_id))
-
 
 class RegiaoSelect(discord.ui.Select):
     def __init__(self, *, channel_id: int, leader_id: int):
@@ -681,39 +839,65 @@ class GrupoView(discord.ui.View):
             await interaction.response.send_message(err, ephemeral=True)
             return
 
+        deferred = False
         try:
-            try:
-                for target in list(getattr(channel, 'overwrites', {}).keys()):
-                    if isinstance(target, discord.Role):
-                        try:
-                            await channel.set_permissions(target, overwrite=None)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
 
-            # Bloquear @everyone (cargo default) para que não possam conectar
+        try:
             guild = interaction.guild
+            # Prepara overwrites: negar connect para @everyone e conceder connect para membros presentes
+            new_overwrites: dict = {}
             if guild:
-                try:
-                    await channel.set_permissions(guild.default_role, connect=False)
-                except Exception:
-                    pass
+                new_overwrites[guild.default_role] = discord.PermissionOverwrite(connect=False)
 
-            # Garantir que membros já presentes mantenham acesso individual
             for m in list(channel.members):
                 if m.bot:
                     continue
+                new_overwrites[m] = discord.PermissionOverwrite(connect=True)
+
+            try:
+                await channel.edit(overwrites=new_overwrites)
+            except Exception:
+                # fallback para operações individuais se channel.edit falhar
                 try:
-                    await channel.set_permissions(m, connect=True)
+                    for target in list(getattr(channel, 'overwrites', {}).keys()):
+                        if isinstance(target, discord.Role):
+                            try:
+                                await channel.set_permissions(target, overwrite=None)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+                if guild:
+                    try:
+                        await channel.set_permissions(guild.default_role, connect=False)
+                    except Exception:
+                        pass
+                for m in list(channel.members):
+                    if m.bot:
+                        continue
+                    try:
+                        await channel.set_permissions(m, connect=True)
+                    except Exception:
+                        pass
 
-            await interaction.response.send_message("**Canal bloqueado**, agora apenas usuario convidados poderão entrar no canal de voz.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**Canal bloqueado**, agora apenas usuários convidados poderão entrar no canal de voz.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**Canal bloqueado**, agora apenas usuários convidados poderão entrar no canal de voz.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
         except Exception:
-            await interaction.response.send_message("**ERRO:** Não foi possível bloquear o canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não foi possível bloquear o canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não foi possível bloquear o canal.", ephemeral=True)
 
     # OCULTAR CHAMADA (privar visualização do canal)
     @discord.ui.button(emoji="<:ocultar:1460317226153545759>", style=discord.ButtonStyle.secondary, custom_id="grupo_ocultar")
@@ -723,40 +907,65 @@ class GrupoView(discord.ui.View):
             await interaction.response.send_message(err, ephemeral=True)
             return
 
+        deferred = False
         try:
-            # Remover overwrites de cargos para reconfigurar visualização
-            try:
-                for target in list(getattr(channel, 'overwrites', {}).keys()):
-                    if isinstance(target, discord.Role):
-                        try:
-                            await channel.set_permissions(target, overwrite=None)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
 
+        try:
             guild = interaction.guild
-            # Negar visualização e entrada para @everyone
+            new_overwrites: dict = {}
             if guild:
-                try:
-                    await channel.set_permissions(guild.default_role, view_channel=False, connect=False)
-                except Exception:
-                    pass
+                new_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False, connect=False)
 
-            # Garantir que membros já presentes mantenham acesso individual (visualizar + conectar)
             for m in list(channel.members):
                 if m.bot:
                     continue
+                new_overwrites[m] = discord.PermissionOverwrite(view_channel=True, connect=True)
+
+            try:
+                await channel.edit(overwrites=new_overwrites)
+            except Exception:
+                # fallback para operações individuais
                 try:
-                    await channel.set_permissions(m, view_channel=True, connect=True)
+                    for target in list(getattr(channel, 'overwrites', {}).keys()):
+                        if isinstance(target, discord.Role):
+                            try:
+                                await channel.set_permissions(target, overwrite=None)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+                if guild:
+                    try:
+                        await channel.set_permissions(guild.default_role, view_channel=False, connect=False)
+                    except Exception:
+                        pass
+                for m in list(channel.members):
+                    if m.bot:
+                        continue
+                    try:
+                        await channel.set_permissions(m, view_channel=True, connect=True)
+                    except Exception:
+                        pass
 
-            await interaction.response.send_message("**Canal ocultado**, agora apenas os usuarios presentes e convidados poderão ver e entrar na chamada.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**Canal ocultado**, agora apenas os usuarios presentes e convidados poderão ver e entrar na chamada.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**Canal ocultado**, agora apenas os usuarios presentes e convidados poderão ver e entrar na chamada.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
         except Exception:
-            await interaction.response.send_message("**ERRO:** Não foi possível ocultar o canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não foi possível ocultar o canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não foi possível ocultar o canal.", ephemeral=True)
+                
     # REVELAR CHAMADA (tornar visível para todos novamente)
     @discord.ui.button(emoji="<:revelar:1460318751189635133>", style=discord.ButtonStyle.secondary, custom_id="grupo_revelar")
     async def revelar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -765,43 +974,56 @@ class GrupoView(discord.ui.View):
             await interaction.response.send_message(err, ephemeral=True)
             return
 
+        deferred = False
         try:
-            # Remover overwrites de cargos e membros para revelar o canal
-            try:
-                for target in list(getattr(channel, 'overwrites', {}).keys()):
-                    try:
-                        await channel.set_permissions(target, overwrite=None)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
 
-            # Garantir que @everyone não esteja negado explicitamente (remover overwrite)
+        try:
             guild = interaction.guild
-            if guild:
-                try:
-                    await channel.set_permissions(guild.default_role, overwrite=None)
-                except Exception:
-                    pass
+            # Remontar overwrites removendo negações de @everyone e reaplicando cargo MEMBRO_CARGO_ID
+            new_overwrites: dict = {}
 
-            # Reaplicar permissão do cargo de membros (se configurado)
             MEMBRO_CARGO_ID = int(os.getenv('MEMBRO_CARGO_ID') or 0)
-            if MEMBRO_CARGO_ID:
+            if MEMBRO_CARGO_ID and guild:
+                role = guild.get_role(MEMBRO_CARGO_ID)
+                if role:
+                    new_overwrites[role] = discord.PermissionOverwrite(view_channel=True, connect=True)
+
+            try:
+                await channel.edit(overwrites=new_overwrites)
+            except Exception:
+                # fallback: limpar overwrites e reaplicar role overwrite
                 try:
-                    role = guild.get_role(MEMBRO_CARGO_ID) if guild else None
-                    if role:
+                    for target in list(getattr(channel, 'overwrites', {}).keys()):
                         try:
-                            await channel.set_permissions(role, view_channel=True, connect=True)
+                            await channel.set_permissions(target, overwrite=None)
                         except Exception:
                             pass
                 except Exception:
                     pass
+                if MEMBRO_CARGO_ID and guild and role:
+                    try:
+                        await channel.set_permissions(role, view_channel=True, connect=True)
+                    except Exception:
+                        pass
 
-            await interaction.response.send_message("**Canal revelado**, agora todos os usuarios podem ver e entrar novamente.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**Canal revelado**, agora todos podem ver e entrar novamente.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**Canal revelado**, agora todos podem ver e entrar novamente.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
         except Exception:
-            await interaction.response.send_message("**ERRO:** Não foi possível revelar o canal.", ephemeral=True)
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não foi possível revelar o canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não foi possível revelar o canal.", ephemeral=True)
 
     # LIBERAR CHAMADA
     @discord.ui.button(emoji="<:Liberar_Chamada:1437593661285073006>", style=discord.ButtonStyle.secondary, custom_id="grupo_liberar")
@@ -850,54 +1072,115 @@ class GrupoView(discord.ui.View):
     @discord.ui.button(emoji="<:Assumir_Lideranca:1437592237763723476>", style=discord.ButtonStyle.secondary, custom_id="grupo_assumir_lideranca")
     async def assumir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
+        # Precisa estar em um canal de voz
         if not getattr(member, "voice", None) or not member.voice.channel:
             await interaction.response.send_message("**ERRO:** Você precisa estar em um canal de voz para usar este botão.", ephemeral=True)
             return
 
         channel = member.voice.channel
 
-        # Checa categoria e canal de criação (se configurados)
+        # Verifica restrições similares a _verificar_lider (canal de criação / categoria)
         CATEGORIA_GRUPOS_ID = int(os.getenv('GRUPOS_CRIADOS_CATEGORY_ID') or 0)
         CRIAR_SALA_ID = int(os.getenv('CRIAR_SALA_CHANNEL_ID') or 0)
-
         if CRIAR_SALA_ID and channel.id == CRIAR_SALA_ID:
             await interaction.response.send_message("**ERRO:** Este canal não pode ser editado.", ephemeral=True)
             return
-
         if CATEGORIA_GRUPOS_ID:
             if not getattr(channel, "category", None) or channel.category.id != CATEGORIA_GRUPOS_ID:
                 await interaction.response.send_message("**ERRO:** Este menu só funciona para canais de voz temporarios.", ephemeral=True)
                 return
 
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
+
+        criar_cog = None
         try:
             criar_cog = interaction.client.get_cog("CriarGrupos")
         except Exception:
             criar_cog = None
 
-        if not criar_cog:
-            await interaction.response.send_message("**ERRO:** Módulo de criação de salas não encontrado.", ephemeral=True)
+        leader_id = None
+        if criar_cog and hasattr(criar_cog, "canais_criados") and isinstance(criar_cog.canais_criados, dict):
+            leader_id = criar_cog.canais_criados.get(channel.id)
+
+        # Se você já é o líder, avisa
+        if leader_id == member.id:
+            if deferred:
+                await interaction.followup.send("**ERRO:** Você já é o líder desta chamada.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Você já é o líder desta chamada.", ephemeral=True)
             return
 
-        if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
-            criar_cog.canais_criados = {}
-
-        lider_atual_id = criar_cog.canais_criados.get(channel.id)
-        if lider_atual_id:
-            # Se quem clicou já é o líder, informa e retorna
-            if lider_atual_id == member.id:
-                await interaction.response.send_message("**ERRO:** Você já é o líder desta sala.", ephemeral=True)
-                return
-
-            lider_member = channel.guild.get_member(lider_atual_id)
-            if lider_member and getattr(lider_member, "voice", None) and lider_member.voice.channel and lider_member.voice.channel.id == channel.id:
-                await interaction.response.send_message("**ERRO:** O líder atual ainda está presente na chamada.", ephemeral=True)
-                return
-
-        criar_cog.canais_criados[channel.id] = member.id
+        # Se existe um líder e ele está presente na chamada, não permitir assumir
         try:
-            await interaction.response.send_message(f"**Liderança assumida**, agora `{member.display_name}` é o líder desta sala.", ephemeral=True)
+            if leader_id:
+                guild = interaction.guild
+                leader_member = guild.get_member(leader_id) if guild else None
+                if leader_member and getattr(leader_member, "voice", None) and leader_member.voice.channel and leader_member.voice.channel.id == channel.id:
+                    if deferred:
+                        await interaction.followup.send("**ERRO:** Não é possível assumir a liderança enquanto o líder atual está presente na chamada", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("**ERRO:** Não é possível assumir a liderança enquanto o líder atual está presente na chamada", ephemeral=True)
+                    return
         except Exception:
+            # se algo falhar ao verificar presença do líder, continua e permite assumir
             pass
+
+        # Remover negações de @everyone e reaplicar cargo MEMBRO_CARGO_ID se configurado
+        try:
+            guild = interaction.guild
+            new_overwrites: dict = {}
+
+            MEMBRO_CARGO_ID = int(os.getenv('MEMBRO_CARGO_ID') or 0)
+            role = None
+            if MEMBRO_CARGO_ID and guild:
+                role = guild.get_role(MEMBRO_CARGO_ID)
+                if role:
+                    new_overwrites[role] = discord.PermissionOverwrite(connect=True, view_channel=True)
+
+            try:
+                await channel.edit(overwrites=new_overwrites)
+            except Exception:
+                # fallback: limpar overwrites individualmente e reaplicar role overwrite
+                try:
+                    for target in list(getattr(channel, 'overwrites', {}).keys()):
+                        try:
+                            await channel.set_permissions(target, overwrite=None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if MEMBRO_CARGO_ID and guild and role:
+                    try:
+                        await channel.set_permissions(role, connect=True, view_channel=True)
+                    except Exception:
+                        pass
+
+            # Atualiza o registro de líder
+            if criar_cog:
+                if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
+                    criar_cog.canais_criados = {}
+                criar_cog.canais_criados[channel.id] = member.id
+
+            if deferred:
+                await interaction.followup.send(f"**Liderança assumida**, agora você é o líder desta sala.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"**Liderança assumida**, agora você é o líder desta sala.", ephemeral=True)
+        except discord.Forbidden:
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+        except Exception:
+            if deferred:
+                await interaction.followup.send("**ERRO:** Não foi possível assumir a liderança do canal.", ephemeral=True)
+            else:
+                await interaction.response.send_message("**ERRO:** Não foi possível assumir a liderança do canal.", ephemeral=True)
 
     # TRANSFERIR LIDERANÇA
     @discord.ui.button(emoji="<:Transferir_Lideranca:1437625407972315251>", style=discord.ButtonStyle.secondary, custom_id="grupo_transferir_lideranca")
