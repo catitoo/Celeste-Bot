@@ -69,9 +69,10 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
 
         async def _reply(msg: str):
             if deferred:
-                await interaction.followup.send(msg, ephemeral=True)
+                return await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=True)
+                return None
 
         if interaction.user.id != self.leader_id:
             await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
@@ -367,6 +368,103 @@ class TransferirLiderView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(TransferirLiderSelect(channel_id=channel_id, leader_id=leader_id))
 
+
+class RegiaoSelect(discord.ui.Select):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        options = [
+            discord.SelectOption(label="Automático (recomendado)", value="auto", description="Deixe o Discord escolher a melhor região."),
+            discord.SelectOption(label="Brazil", value="brazil"),
+            discord.SelectOption(label="Hong Kong", value="hongkong"),
+            discord.SelectOption(label="India", value="india"),
+            discord.SelectOption(label="Japan", value="japan"),
+            discord.SelectOption(label="Rotterdam", value="rotterdam"),
+            discord.SelectOption(label="Singapore", value="singapore"),
+            discord.SelectOption(label="South Africa", value="southafrica"),
+            discord.SelectOption(label="Sydney", value="sydney"),
+            discord.SelectOption(label="US Central", value="us-central"),
+            discord.SelectOption(label="US East", value="us-east"),
+            discord.SelectOption(label="US South", value="us-south"),
+            discord.SelectOption(label="US West", value="us-west"),
+        ]
+        super().__init__(placeholder="Selecione a região da chamada.", min_values=1, max_values=1, options=options)
+        self.channel_id = channel_id
+        self.leader_id = leader_id
+
+    async def callback(self, interaction: discord.Interaction):
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except Exception:
+            pass
+
+        async def _reply(msg: str):
+            if deferred:
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+
+        if interaction.user.id != self.leader_id:
+            await _reply("**ERRO:** Apenas quem abriu este menu pode usar.")
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await _reply("**ERRO:** Este menu só funciona dentro de um servidor.")
+            return
+
+        leader_member = guild.get_member(self.leader_id)
+        if not leader_member or not getattr(leader_member, "voice", None) or not leader_member.voice.channel:
+            await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
+            return
+        if leader_member.voice.channel.id != self.channel_id:
+            await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
+            return
+
+        selected = self.values[0]
+        # 'auto' -> None para permitir seleção automática do Discord
+        region_value = None if selected == "auto" else selected
+
+        channel = leader_member.voice.channel
+        try:
+            # Alguns builds usam 'rtc_region' como parâmetro para editar a região
+            await channel.edit(rtc_region=region_value)
+            sent = await _reply(f"**Região alterada**, agora o canal de voz está com a região em: `{region_value}`") if region_value else await _reply("**Região alterada**, agora o modo automático está ativado.")
+            try:
+                if deferred and sent:
+                    await sent.delete()
+                else:
+                    await interaction.delete_original_response()
+            except Exception:
+                pass
+        except TypeError:
+            # fallback: tentar com 'region' caso a versão da lib aceite outro nome
+            try:
+                await channel.edit(region=region_value)
+                sent = await _reply(f"**Região alterada**, agora o canal de voz está com a região em: `{region_value}`") if region_value else await _reply("**Região alterada**, agora o modo automático está ativado.")
+                try:
+                    if deferred and sent:
+                        await sent.delete()
+                    else:
+                        await interaction.delete_original_response()
+                except Exception:
+                    pass
+            except Exception as e:
+                await _reply("**ERRO:** Não foi possível alterar a região deste canal.")
+        except discord.Forbidden:
+            await _reply("**ERRO:** Não tenho permissão para alterar a região deste canal.")
+        except discord.HTTPException as e:
+            if getattr(e, "status", None) == 429:
+                await _reply("**ERRO:** Rate limit do Discord. Tente novamente mais tarde.")
+            else:
+                await _reply("**ERRO:** Não foi possível alterar a região do canal.")
+
+
+class RegiaoView(discord.ui.View):
+    def __init__(self, *, channel_id: int, leader_id: int):
+        super().__init__(timeout=60)
+        self.add_item(RegiaoSelect(channel_id=channel_id, leader_id=leader_id))
+
 class GrupoView(discord.ui.View):
     def __init__(self, *, timeout: float | None = None):
         super().__init__(timeout=timeout)
@@ -614,6 +712,21 @@ class GrupoView(discord.ui.View):
         view = TransferirLiderView(channel_id=channel.id, leader_id=interaction.user.id)
         await interaction.response.send_message(
             "Selecione abaixo para quem deseja transferir a liderança:",
+            view=view,
+            ephemeral=True
+        )
+
+    # TROCAR REGIÃO
+    @discord.ui.button(emoji="<:Trocar_Regiao:1437606614910894120>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_regiao")
+    async def trocar_regiao(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        view = RegiaoView(channel_id=channel.id, leader_id=interaction.user.id)
+        await interaction.response.send_message(
+            "Selecione abaixo a região desejada para a chamada:",
             view=view,
             ephemeral=True
         )

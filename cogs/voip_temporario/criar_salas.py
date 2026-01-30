@@ -78,23 +78,6 @@ class CriarGrupos(commands.Cog):
 
             asyncio.create_task(self._limpar_recentes(member.id))
 
-            embed = discord.Embed(
-                title=f"{nome_canal}",
-                description="Organize seu grupo usando os botões abaixo.",
-                color=discord.Color.orange()
-            )
-            embed.set_image(url="https://example.com/sua_imagem.png")
-
-            try:
-                from .editar_salas import GrupoView
-            except Exception:
-                GrupoView = None
-
-            try:
-                await novo_canal.send(embed=embed, view=GrupoView() if GrupoView else None)
-            except Exception as e:
-                print(f"Não foi possível enviar mensagem no canal de voz: {e}")
-
         except discord.Forbidden:
             print("Erro: Bot não tem permissão para criar canais ou mover membros")
         except discord.HTTPException as e:
