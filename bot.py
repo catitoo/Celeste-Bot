@@ -1,6 +1,11 @@
 import discord
 from config import bot, TOKEN  # Importa do arquivo config.py
 import os
+import logging
+
+# Silencia logs informativos do discord
+logging.getLogger('discord').setLevel(logging.WARNING)
+logging.getLogger('discord.gateway').setLevel(logging.WARNING)
 
 async def carregar_cogs():
     for root, dirs, files in os.walk('./cogs'):

@@ -316,7 +316,7 @@ class GrupoView(discord.ui.View):
 
         return channel, False, "**ERRO:** Apenas o líder da sala pode fazer isso."
 
-    # EDITAR NOME
+    # EDITAR NOME DA SALA
     @discord.ui.button(emoji="<:Editar_Nome:1437591536463249448>", style=discord.ButtonStyle.secondary, custom_id="grupo_editar_nome")
     async def editar_nome(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel, is_leader, err = self._verificar_lider(interaction)
@@ -361,7 +361,7 @@ class GrupoView(discord.ui.View):
 
         await interaction.response.send_modal(RenomearModal())
 
-    # CONVIDAR USUARIOS
+    # CONVIDAR USUÁRIOS PARA CHAMADA
     @discord.ui.button(emoji="<:Convidar_Jogadores:1437594789800312852>", style=discord.ButtonStyle.secondary, custom_id="grupo_convidar")
     async def convidar(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel, is_leader, err = self._verificar_lider(interaction)
@@ -375,7 +375,7 @@ class GrupoView(discord.ui.View):
             ephemeral=True
         )
 
-    # REMOVER USUARIOS
+    # REMOVER USUÁRIOS DA CHAMADA
     @discord.ui.button(emoji="<:Remover_Membro:1437599768246222958>", style=discord.ButtonStyle.secondary, custom_id="grupo_remover")
     async def remover_membro(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel, is_leader, err = self._verificar_lider(interaction)
@@ -389,7 +389,7 @@ class GrupoView(discord.ui.View):
             ephemeral=True
         )
 
-    # TROCAR LIMITE DE MEMBROS
+    # TROCAR LIMITE DE MEMBROS DA CHAMADA
     @discord.ui.button(emoji="<:Trocar_Limite_Membro:1437601993404452874>", style=discord.ButtonStyle.secondary, custom_id="grupo_trocar_limite")
     async def trocar_limite(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel, is_leader, err = self._verificar_lider(interaction)
@@ -463,6 +463,59 @@ class GrupoView(discord.ui.View):
                 await interaction.followup.send("**ERRO:** Tente novamente mais tarde.", ephemeral=True)
             else:
                 await interaction.followup.send("**ERRO:** Não foi possível deletar o canal.", ephemeral=True)
+
+    # ASSUMIR LIDERANÇA
+    @discord.ui.button(emoji="<:Assumir_Lideranca:1437592237763723476>", style=discord.ButtonStyle.secondary, custom_id="grupo_assumir_lideranca")
+    async def assumir_lideranca(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not getattr(member, "voice", None) or not member.voice.channel:
+            await interaction.response.send_message("**ERRO:** Você precisa estar em uma sala de voz para usar este botão.", ephemeral=True)
+            return
+
+        channel = member.voice.channel
+
+        # Checa categoria e canal de criação (se configurados)
+        CATEGORIA_GRUPOS_ID = int(os.getenv('GRUPOS_CRIADOS_CATEGORY_ID') or 0)
+        CRIAR_SALA_ID = int(os.getenv('CRIAR_SALA_CHANNEL_ID') or 0)
+
+        if CRIAR_SALA_ID and channel.id == CRIAR_SALA_ID:
+            await interaction.response.send_message("**ERRO:** Este canal não pode ser editado.", ephemeral=True)
+            return
+
+        if CATEGORIA_GRUPOS_ID:
+            if not getattr(channel, "category", None) or channel.category.id != CATEGORIA_GRUPOS_ID:
+                await interaction.response.send_message("**ERRO:** Este menu só funciona para canais de voz temporarios.", ephemeral=True)
+                return
+
+        try:
+            criar_cog = interaction.client.get_cog("CriarGrupos")
+        except Exception:
+            criar_cog = None
+
+        if not criar_cog:
+            await interaction.response.send_message("**ERRO:** Módulo de criação de salas não encontrado.", ephemeral=True)
+            return
+
+        if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
+            criar_cog.canais_criados = {}
+
+        lider_atual_id = criar_cog.canais_criados.get(channel.id)
+        if lider_atual_id:
+            # Se quem clicou já é o líder, informa e retorna
+            if lider_atual_id == member.id:
+                await interaction.response.send_message("**ERRO:** Você já é o líder desta sala.", ephemeral=True)
+                return
+
+            lider_member = channel.guild.get_member(lider_atual_id)
+            if lider_member and getattr(lider_member, "voice", None) and lider_member.voice.channel and lider_member.voice.channel.id == channel.id:
+                await interaction.response.send_message("**ERRO:** O líder atual ainda está presente na chamada.", ephemeral=True)
+                return
+
+        criar_cog.canais_criados[channel.id] = member.id
+        try:
+            await interaction.response.send_message(f"**Liderança assumida**, agora `{member.display_name}` é o líder desta sala.", ephemeral=True)
+        except Exception:
+            pass
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EditarSalas(bot))
