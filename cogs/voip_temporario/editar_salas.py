@@ -126,12 +126,14 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
                 ignorados.append(target.display_name)
                 continue
 
-            # Se o canal estiver bloqueado para @everyone, conceda permissão de entrada ao convidado
+            # Se o canal estiver bloqueado/oculto para @everyone, conceda permissão de visualização/entrada ao convidado
             try:
                 default_overwrite = channel.overwrites_for(guild.default_role)
-                if getattr(default_overwrite, 'connect', None) is False:
+                default_connect_blocked = getattr(default_overwrite, 'connect', None) is False
+                default_view_blocked = getattr(default_overwrite, 'view_channel', None) is False
+                if default_connect_blocked or default_view_blocked:
                     try:
-                        await channel.set_permissions(target, connect=True)
+                        await channel.set_permissions(target, connect=True, view_channel=True)
                     except Exception:
                         pass
             except Exception:
@@ -712,6 +714,94 @@ class GrupoView(discord.ui.View):
             await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
         except Exception:
             await interaction.response.send_message("**ERRO:** Não foi possível bloquear o canal.", ephemeral=True)
+
+    # OCULTAR CHAMADA (privar visualização do canal)
+    @discord.ui.button(emoji="<:ocultar:1460317226153545759>", style=discord.ButtonStyle.secondary, custom_id="grupo_ocultar")
+    async def ocultar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            # Remover overwrites de cargos para reconfigurar visualização
+            try:
+                for target in list(getattr(channel, 'overwrites', {}).keys()):
+                    if isinstance(target, discord.Role):
+                        try:
+                            await channel.set_permissions(target, overwrite=None)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            guild = interaction.guild
+            # Negar visualização e entrada para @everyone
+            if guild:
+                try:
+                    await channel.set_permissions(guild.default_role, view_channel=False, connect=False)
+                except Exception:
+                    pass
+
+            # Garantir que membros já presentes mantenham acesso individual (visualizar + conectar)
+            for m in list(channel.members):
+                if m.bot:
+                    continue
+                try:
+                    await channel.set_permissions(m, view_channel=True, connect=True)
+                except Exception:
+                    pass
+
+            await interaction.response.send_message("**Canal ocultado**, agora apenas os usuarios presentes e convidados poderão ver e entrar na chamada.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("**ERRO:** Não foi possível ocultar o canal.", ephemeral=True)
+    # REVELAR CHAMADA (tornar visível para todos novamente)
+    @discord.ui.button(emoji="<:revelar:1460318751189635133>", style=discord.ButtonStyle.secondary, custom_id="grupo_revelar")
+    async def revelar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            # Remover overwrites de cargos e membros para revelar o canal
+            try:
+                for target in list(getattr(channel, 'overwrites', {}).keys()):
+                    try:
+                        await channel.set_permissions(target, overwrite=None)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Garantir que @everyone não esteja negado explicitamente (remover overwrite)
+            guild = interaction.guild
+            if guild:
+                try:
+                    await channel.set_permissions(guild.default_role, overwrite=None)
+                except Exception:
+                    pass
+
+            # Reaplicar permissão do cargo de membros (se configurado)
+            MEMBRO_CARGO_ID = int(os.getenv('MEMBRO_CARGO_ID') or 0)
+            if MEMBRO_CARGO_ID:
+                try:
+                    role = guild.get_role(MEMBRO_CARGO_ID) if guild else None
+                    if role:
+                        try:
+                            await channel.set_permissions(role, view_channel=True, connect=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            await interaction.response.send_message("**Canal revelado**, agora todos os usuarios podem ver e entrar novamente.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("**ERRO:** Não foi possível revelar o canal.", ephemeral=True)
 
     # LIBERAR CHAMADA
     @discord.ui.button(emoji="<:Liberar_Chamada:1437593661285073006>", style=discord.ButtonStyle.secondary, custom_id="grupo_liberar")
