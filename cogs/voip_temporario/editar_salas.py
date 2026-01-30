@@ -126,6 +126,17 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
                 ignorados.append(target.display_name)
                 continue
 
+            # Se o canal estiver bloqueado para @everyone, conceda permissão de entrada ao convidado
+            try:
+                default_overwrite = channel.overwrites_for(guild.default_role)
+                if getattr(default_overwrite, 'connect', None) is False:
+                    try:
+                        await channel.set_permissions(target, connect=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             try:
                 now_br = datetime.utcnow() - timedelta(hours=3)
                 footer_text = now_br.strftime("%d/%m/%Y  •  %H:%M:%S")
@@ -243,6 +254,8 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
             await _reply("**ERRO:** Você não está mais na mesma sala onde abriu o menu.")
             return
 
+        channel = leader_member.voice.channel
+
         removidos: list[str] = []
         ignorados: list[str] = []
 
@@ -262,6 +275,16 @@ class RemoverMembrosSelect(discord.ui.UserSelect):
             try:
                 await target.move_to(None, reason=f"Removido da call por {interaction.user}")
                 removidos.append(target.display_name)
+                # Se o canal estiver bloqueado para @everyone, limpar overwrite do usuário
+                try:
+                    default_overwrite = channel.overwrites_for(guild.default_role)
+                    if getattr(default_overwrite, 'connect', None) is False:
+                        try:
+                            await channel.set_permissions(target, overwrite=None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except discord.Forbidden:
                 await _reply("**ERRO:** Não tenho permissão para mover/desconectar membros.")
                 return
@@ -647,6 +670,91 @@ class GrupoView(discord.ui.View):
                 await interaction.followup.send("**ERRO:** Tente novamente mais tarde.", ephemeral=True)
             else:
                 await interaction.followup.send("**ERRO:** Não foi possível deletar o canal.", ephemeral=True)
+                
+    # BLOQUEAR CHAMADA
+    @discord.ui.button(emoji="<:Bloquear_Chamada:1437593371869708459>", style=discord.ButtonStyle.secondary, custom_id="grupo_bloquear")
+    async def bloquear_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            try:
+                for target in list(getattr(channel, 'overwrites', {}).keys()):
+                    if isinstance(target, discord.Role):
+                        try:
+                            await channel.set_permissions(target, overwrite=None)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Bloquear @everyone (cargo default) para que não possam conectar
+            guild = interaction.guild
+            if guild:
+                try:
+                    await channel.set_permissions(guild.default_role, connect=False)
+                except Exception:
+                    pass
+
+            # Garantir que membros já presentes mantenham acesso individual
+            for m in list(channel.members):
+                if m.bot:
+                    continue
+                try:
+                    await channel.set_permissions(m, connect=True)
+                except Exception:
+                    pass
+
+            await interaction.response.send_message("**Canal bloqueado**, agora apenas usuario convidados poderão entrar no canal de voz.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("**ERRO:** Não foi possível bloquear o canal.", ephemeral=True)
+
+    # LIBERAR CHAMADA
+    @discord.ui.button(emoji="<:Liberar_Chamada:1437593661285073006>", style=discord.ButtonStyle.secondary, custom_id="grupo_liberar")
+    async def liberar_chamada(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel, is_leader, err = self._verificar_lider(interaction)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        try:
+            # Remover overwrites de cargos e membros para liberar o canal
+            try:
+                for target in list(getattr(channel, 'overwrites', {}).keys()):
+                    try:
+                        await channel.set_permissions(target, overwrite=None)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Reaplicar permissão do cargo de membros (se configurado)
+            MEMBRO_CARGO_ID = int(os.getenv('MEMBRO_CARGO_ID') or 0)
+            if MEMBRO_CARGO_ID:
+                guild = interaction.guild
+                try:
+                    role = guild.get_role(MEMBRO_CARGO_ID) if guild else None
+                    if role:
+                        try:
+                            await channel.set_permissions(role, connect=True)
+                        except Exception:
+                            # se falhar ao aplicar, continua e informa sucesso parcial
+                            pass
+                    else:
+                        await interaction.response.send_message("**Aviso:** Cargo `MEMBRO_CARGO_ID` não encontrado no servidor. Canal liberado, porém o cargo não foi configurado.", ephemeral=True)
+                        return
+                except Exception:
+                    pass
+
+            await interaction.response.send_message("**Canal liberado**, agora todos os usuarios recuperaram o acesso ao canal de voz.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("**ERRO:** Não tenho permissão para alterar as permissões deste canal.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("**ERRO:** Não foi possível liberar o canal.", ephemeral=True)
 
     # ASSUMIR LIDERANÇA
     @discord.ui.button(emoji="<:Assumir_Lideranca:1437592237763723476>", style=discord.ButtonStyle.secondary, custom_id="grupo_assumir_lideranca")
