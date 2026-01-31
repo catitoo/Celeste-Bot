@@ -1,5 +1,6 @@
 import discord
 from config import bot, TOKEN  # Importa do arquivo config.py
+from database.setup_database import voip_list_ativos, voip_remover_canal_ativo
 import os
 import logging
 
@@ -21,6 +22,34 @@ async def on_ready():
 
     try:
         await carregar_cogs()  # Carrega os cogs
+        # Limpa canais VoIP salvos que já estejam vazios no momento do startup
+        async def _limpar_voips_vazios():
+            ativos = voip_list_ativos()
+            for entry in ativos:
+                id_voip = int(entry.get('id_voip'))
+                try:
+                    channel = bot.get_channel(id_voip) or await bot.fetch_channel(id_voip)
+                except Exception:
+                    channel = None
+
+                # Se o canal não existir mais, remove do DB
+                if channel is None:
+                    try:
+                        voip_remover_canal_ativo(id_voip)
+                    except Exception:
+                        pass
+                    continue
+
+                # Se não houver membros, deleta o canal e remove do DB
+                try:
+                    if len(channel.members) == 0:
+                        await channel.delete(reason="VoIP vazio no startup - limpeza automática")
+                        voip_remover_canal_ativo(id_voip)
+                except Exception:
+                    # falha ao deletar ou acessar membros, ignora
+                    pass
+
+        await _limpar_voips_vazios()
         await bot.tree.sync()  # Sincroniza comandos de barra
         print("Todos os comandos foram sincronizados com sucesso!")
 

@@ -3,6 +3,12 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 import asyncio
+from database.setup_database import (
+    voip_salvar_canal_ativo,
+    voip_remover_canal_ativo,
+    SessionLocal,
+    VoipAtivo,
+)
 load_dotenv()
 
 MAX_CHANNEL_NAME = 100
@@ -20,6 +26,7 @@ class CriarGrupos(commands.Cog):
         self.bot = bot
         self.canais_criados = {}
         self._recently_moved = set()
+        self._startup_done = False
 
     async def _limpar_recentes(self, member_id):
         await asyncio.sleep(1)
@@ -37,7 +44,13 @@ class CriarGrupos(commands.Cog):
             if len(before.channel.members) == 0:
                 try:
                     await before.channel.delete()
+                    # remover do registro local
                     del self.canais_criados[before.channel.id]
+                    # remover do banco de dados
+                    try:
+                        voip_remover_canal_ativo(int(before.channel.id))
+                    except Exception as e:
+                        print(f"Erro ao remover VoipAtivo do DB: {e}")
                 except discord.Forbidden:
                     print("Erro: Bot não tem permissão para deletar o canal")
                 except discord.HTTPException as e:
@@ -69,6 +82,12 @@ class CriarGrupos(commands.Cog):
 
             self.canais_criados[novo_canal.id] = member.id
 
+            # salvar no banco de dados
+            try:
+                voip_salvar_canal_ativo(int(member.guild.id), int(novo_canal.id), int(member.id))
+            except Exception as e:
+                print(f"Erro ao salvar VoipAtivo no DB: {e}")
+
             self._recently_moved.add(member.id)
             try:
                 await member.move_to(novo_canal)
@@ -82,6 +101,48 @@ class CriarGrupos(commands.Cog):
             print("Erro: Bot não tem permissão para criar canais ou mover membros")
         except discord.HTTPException as e:
             print(f"Erro ao criar canal: {e}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # executar limpeza apenas uma vez
+        if self._startup_done:
+            return
+        self._startup_done = True
+
+        await asyncio.sleep(1)
+        # procurar voips cadastrados no banco que estejam vazios ou inexistentes
+        session = SessionLocal()
+        try:
+            rows = session.query(VoipAtivo).all()
+        except Exception:
+            rows = []
+        finally:
+            session.close()
+
+        for row in rows:
+            try:
+                channel = self.bot.get_channel(int(row.id_voip))
+                # se o canal não existir mais, remover do DB
+                if channel is None:
+                    try:
+                        voip_remover_canal_ativo(int(row.id_voip))
+                    except Exception as e:
+                        print(f"Erro ao remover VoipAtivo (canal inexistente) do DB: {e}")
+                    continue
+                
+                # se existir e estiver vazio, deletar e remover do DB
+                if hasattr(channel, "members") and len(channel.members) == 0:
+                    try:
+                        await channel.delete()
+                    except Exception as e:
+                        print(f"Erro ao deletar canal vazio no startup: {e}")
+                        continue
+                    try:
+                        voip_remover_canal_ativo(int(row.id_voip))
+                    except Exception as e:
+                        print(f"Erro ao remover VoipAtivo do DB após deletar canal no startup: {e}")
+            except Exception:
+                continue
     
 async def setup(bot):
     await bot.add_cog(CriarGrupos(bot))
