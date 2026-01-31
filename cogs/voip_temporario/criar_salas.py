@@ -122,16 +122,18 @@ class CriarGrupos(commands.Cog):
         for row in rows:
             try:
                 channel = self.bot.get_channel(int(row.id_voip))
-                # se o canal não existir mais, remover do DB
                 if channel is None:
                     try:
                         voip_remover_canal_ativo(int(row.id_voip))
                     except Exception as e:
                         print(f"Erro ao remover VoipAtivo (canal inexistente) do DB: {e}")
                     continue
-                
-                # se existir e estiver vazio, deletar e remover do DB
-                if hasattr(channel, "members") and len(channel.members) == 0:
+
+                if not hasattr(channel, "members"):
+                    continue
+
+                # canal vazio -> deletar + remover do DB
+                if len(channel.members) == 0:
                     try:
                         await channel.delete()
                     except Exception as e:
@@ -141,6 +143,39 @@ class CriarGrupos(commands.Cog):
                         voip_remover_canal_ativo(int(row.id_voip))
                     except Exception as e:
                         print(f"Erro ao remover VoipAtivo do DB após deletar canal no startup: {e}")
+                    continue
+
+                # canal tem membros -> garantir líder válido
+                saved_leader_id = int(row.id_lider) if getattr(row, "id_lider", None) is not None else None
+                present_leader = None
+                if saved_leader_id:
+                    for m in channel.members:
+                        try:
+                            if m.id == saved_leader_id:
+                                present_leader = saved_leader_id
+                                break
+                        except Exception:
+                            continue
+
+                if present_leader:
+                    # líder do DB está presente: registrar no cache
+                    self.canais_criados[int(row.id_voip)] = present_leader
+                else:
+                    # escolher novo líder automático (primeiro membro humano não-bot)
+                    new_leader = None
+                    for m in channel.members:
+                        if not m.bot:
+                            new_leader = m
+                            break
+                    if new_leader:
+                        try:
+                            voip_salvar_canal_ativo(int(channel.guild.id), int(channel.id), int(new_leader.id))
+                            self.canais_criados[int(row.id_voip)] = int(new_leader.id)
+                        except Exception as e:
+                            print(f"Erro ao atualizar líder no DB/startup: {e}")
+                    else:
+                        # só bots na chamada: não registra, deixará ser lido novamente depois
+                        continue
             except Exception:
                 continue
     

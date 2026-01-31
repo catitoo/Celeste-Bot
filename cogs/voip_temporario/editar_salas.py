@@ -1,9 +1,10 @@
 import discord
 from discord.ext import commands
 import os
+import re
 from dotenv import load_dotenv, set_key
 from datetime import datetime, timedelta
-import re
+from database.setup_database import voip_salvar_canal_ativo, voip_get_leader_id
 
 load_dotenv()
 
@@ -131,7 +132,7 @@ class ConvidarMembrosSelect(discord.ui.UserSelect):
             return
 
         leader_member = guild.get_member(self.leader_id)
-        if not leader_member or not leader_member.voice or not leader_member.voice.channel:
+        if not leader_member or not getattr(leader_member, "voice", None) or not leader_member.voice.channel:
             sent = await _reply("**ERRO:** Você precisa estar em um canal de voz para usar este menu.")
             await _try_delete_menu(sent)
             return
@@ -586,8 +587,15 @@ class TransferirLiderSelect(discord.ui.UserSelect):
         if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
             criar_cog.canais_criados = {}
 
-        # transfere a liderança
+        # transfere a liderança (cache local)
         criar_cog.canais_criados[self.channel_id] = target.id
+
+        # persistir a nova liderança no DB
+        try:
+            voip_salvar_canal_ativo(int(guild.id), int(self.channel_id), int(target.id))
+        except Exception:
+            pass
+
         sent = await _reply(f"**Liderança transferida**, agora `{target.display_name}` é o novo líder deste canal de voz.")
 
         # Tentar apagar/esconder apenas o menu que continha os componentes
@@ -713,11 +721,11 @@ class GrupoView(discord.ui.View):
         CRIAR_SALA_ID = int(os.getenv('CRIAR_SALA_CHANNEL_ID') or 0)
 
         if CRIAR_SALA_ID and channel.id == CRIAR_SALA_ID:
-            return channel, False, "**ERRO:** Este canal não pode ser editado."
+            return None, False, None
 
         if CATEGORIA_GRUPOS_ID:
             if not getattr(channel, "category", None) or channel.category.id != CATEGORIA_GRUPOS_ID:
-                return channel, False, "**ERRO:** Este menu só funciona para canais de voz temporarios."
+                return None, False, None
 
         criar_cog = None
         try:
@@ -725,10 +733,28 @@ class GrupoView(discord.ui.View):
         except Exception:
             criar_cog = None
 
+        lider_id = None
         if criar_cog and hasattr(criar_cog, "canais_criados"):
             lider_id = criar_cog.canais_criados.get(channel.id)
-            if lider_id == member.id:
-                return channel, True, None
+
+        # Se não tem no cache local, tentar recuperar do DB e popular o cache
+        if lider_id is None:
+            try:
+                db_leader = voip_get_leader_id(int(channel.id))
+                if db_leader:
+                    lider_id = int(db_leader)
+                    if criar_cog:
+                        if not hasattr(criar_cog, "canais_criados") or not isinstance(criar_cog.canais_criados, dict):
+                            criar_cog.canais_criados = {}
+                        criar_cog.canais_criados[channel.id] = lider_id
+            except Exception:
+                pass
+
+        if criar_cog and hasattr(criar_cog, "canais_criados"):
+            lider_id = criar_cog.canais_criados.get(channel.id)
+
+        if lider_id == member.id:
+            return channel, True, None
 
         return channel, False, "**ERRO:** Apenas o líder da sala pode fazer isso."
 
@@ -1154,7 +1180,7 @@ class GrupoView(discord.ui.View):
             criar_cog = None
 
         leader_id = None
-        if criar_cog and hasattr(criar_cog, "canais_criados") and isinstance(criar_cog.canais_criados, dict):
+        if criar_cog and hasattr(criar_cog, "canais_criados"):
             leader_id = criar_cog.canais_criados.get(channel.id)
 
         # Se você já é o líder, avisa
@@ -1216,6 +1242,12 @@ class GrupoView(discord.ui.View):
                     criar_cog.canais_criados = {}
                 criar_cog.canais_criados[channel.id] = member.id
 
+            # Persistir a nova liderança no DB
+            try:
+                voip_salvar_canal_ativo(int(channel.guild.id), int(channel.id), int(member.id))
+            except Exception:
+                pass
+
             if deferred:
                 await interaction.followup.send(f"**Liderança assumida**, agora você é o líder desta sala.", ephemeral=True)
             else:
@@ -1265,7 +1297,7 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(EditarSalas(bot))
 
     # RECOMENDADO: manter só a view com callbacks registrada como persistente
-    bot.add_view(GrupoView())
+    # bot.add_view(GrupoView())
 
     # OPCIONAL/EVITAR: não registrar Components como view persistente
     # bot.add_view(Components())
