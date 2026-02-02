@@ -4,7 +4,7 @@ import os
 import re
 from dotenv import load_dotenv, set_key
 from datetime import datetime, timedelta
-from database.setup_database import voip_salvar_canal_ativo, voip_get_leader_id
+from database.setup_database import voip_salvar_canal_ativo, voip_get_leader_id, voip_remover_canal_ativo
 
 load_dotenv()
 
@@ -898,6 +898,11 @@ class GrupoView(discord.ui.View):
 
         try:
             await channel.delete(reason=f"Deletado pelo líder {interaction.user} (ID {interaction.user.id})")
+            # Remover também do banco de dados (tabela VoipAtivo)
+            try:
+                voip_remover_canal_ativo(int(channel.id))
+            except Exception:
+                pass
         except discord.Forbidden:
             await interaction.followup.send("**ERRO:** Não tenho permissão para deletar este canal.", ephemeral=True)
         except discord.HTTPException as e:
