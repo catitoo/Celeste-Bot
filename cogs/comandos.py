@@ -188,9 +188,9 @@ class Components(discord.ui.LayoutView):
         discord.ui.Section(
             discord.ui.TextDisplay(content="**REGRAS DO SERVIDOR**"),
             discord.ui.TextDisplay(content="\u200b"),
-            discord.ui.TextDisplay(content="Fique por dentro das nossas regras de convivência! \nLeia atentamente para garantir a melhor experiência na comunidade.\""),
+            discord.ui.TextDisplay(content="Fique por dentro das nossas regras de convivência! \nLeia atentamente para garantir a melhor experiência na comunidade."),
             accessory=discord.ui.Thumbnail(
-                media="https://i.ibb.co/CpdyktYh/rules-1.png",
+                media="https://i.ibb.co/bgnn4m7h/imagem-regras-icon.png",
             ),
         ),
         discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large),
