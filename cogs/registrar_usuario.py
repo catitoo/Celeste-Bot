@@ -35,7 +35,7 @@ class BotoesFormulario(discord.ui.View):
 
         old_message_id = str(interaction.message.id)
 
-        # Busca o formulário original
+        # Busca o formulário original e valida
         session = SessionLocal()
         try:
             form = session.query(FormulariosDesenvolvedor).filter_by(id_mensagem=old_message_id).first()
@@ -45,34 +45,113 @@ class BotoesFormulario(discord.ui.View):
             if form.status != "pendente":
                 await interaction.followup.send("Formulário já foi avaliado.", ephemeral=True)
                 return
-        except Exception:
+
+            # Copia os dados necessários para possível reversão
+            original_data = {
+                "id_usuario": form.id_usuario,
+                "id_mensagem": form.id_mensagem,
+                "nome": form.nome,
+                "sexo": form.sexo,
+                "genero_favorito": form.genero_favorito,
+                "plataforma_principal": form.plataforma_principal,
+                "redes_sociais": form.redes_sociais,
+                "status": form.status,
+                "data_envio": form.data_envio
+            }
+
+            # Cria registro aprovado (sem id_mensagem por enquanto) e remove o original
+            approver_apelido = getattr(member, "display_name", str(member))
+            aprovado = FormulariosDesenvolvedorAprovados(
+                id_usuario=int(form.id_usuario),
+                id_mensagem="",  # será atualizado após envio da mensagem
+                nome=form.nome,
+                sexo=form.sexo,
+                genero_favorito=form.genero_favorito,
+                plataforma_principal=form.plataforma_principal,
+                redes_sociais=form.redes_sociais,
+                status="aprovado",
+                data_envio=form.data_envio,
+                aprovado_por=approver_apelido,
+                data_aprovacao=datetime.utcnow()
+            )
+            session.add(aprovado)
+            session.delete(form)
+            session.commit()
+            aprovado_id = getattr(aprovado, "id", None)
+        except Exception as e:
             session.rollback()
-            await interaction.followup.send("Erro ao acessar o banco de dados.", ephemeral=True)
+            session.close()
+            print(f"Erro ao mover formulário no banco de dados: {e}")
+            await interaction.followup.send("Erro ao mover formulário no banco de dados.", ephemeral=True)
             return
         finally:
             session.close()
 
-        # Prepara conteúdo/embed para reenviar
+        # Preparar embed/conteúdo a enviar (reuso do embed original do message)
+        approver_apelido = getattr(member, "display_name", str(member))
         embed = interaction.message.embeds[0] if interaction.message.embeds else None
         content = interaction.message.content if not embed else None
 
         approved_channel_env = os.getenv("FORMULARIO_APROVADO_DESENVOLVEDOR_CHANNEL_ID")
         if not approved_channel_env:
             await interaction.followup.send("Canal de aprovados não configurado.", ephemeral=True)
+            # tenta reverter caso algo tenha saído estranho (remoção já feita)
+            try:
+                s = SessionLocal()
+                # remove aprovado criado e recria o original
+                if aprovado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorAprovados).get(aprovado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
             return
         try:
             approved_channel_id = int(approved_channel_env)
         except ValueError:
             await interaction.followup.send("ID do canal de aprovados inválido.", ephemeral=True)
+            # reverter DB
+            try:
+                s = SessionLocal()
+                if aprovado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorAprovados).get(aprovado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
             return
 
         approved_channel = self.bot.get_channel(approved_channel_id)
         if approved_channel is None:
             await interaction.followup.send("Não encontrei o canal de aprovados configurado.", ephemeral=True)
+            # reverter DB
+            try:
+                s = SessionLocal()
+                if aprovado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorAprovados).get(aprovado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
             return
 
+        # Envia a mensagem ao canal de aprovados (somente se DB já foi movido com sucesso)
         try:
-            # Cria nova embed com cor e imagem de aprovado, preservando dados do embed original
             if embed:
                 new_embed = discord.Embed(
                     title=embed.title if getattr(embed, "title", None) else None,
@@ -81,6 +160,8 @@ class BotoesFormulario(discord.ui.View):
                 )
                 for f in embed.fields:
                     new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
+                new_embed.add_field(name="\u200b", value="", inline=False)
+                new_embed.add_field(name=f"**Aprovado Por:** `{approver_apelido}`", value="", inline=False)
                 if getattr(embed, "thumbnail", None) and getattr(embed.thumbnail, "url", None):
                     new_embed.set_thumbnail(url=embed.thumbnail.url)
                 if getattr(embed, "author", None) and getattr(embed.author, "name", None):
@@ -93,41 +174,50 @@ class BotoesFormulario(discord.ui.View):
                 new_embed.set_image(url="https://i.ibb.co/gZn6mfHS/formulario-aprovado-imagem.png")
             else:
                 new_embed = discord.Embed(colour=discord.Colour.from_str("#00ff40"))
+                new_embed.add_field(name="\u200b", value="", inline=False)
+                new_embed.add_field(name=f"**Aprovado Por:** `{approver_apelido}`", value="", inline=False)
                 new_embed.set_image(url="https://i.ibb.co/gZn6mfHS/formulario-aprovado-imagem.png")
 
             new_msg = await approved_channel.send(content=content, embed=new_embed)
-        except Exception:
-            await interaction.followup.send("Erro ao enviar a mensagem para o canal de aprovados.", ephemeral=True)
+        except Exception as e:
+            print(f"Erro ao enviar a mensagem para o canal de aprovados: {e}")
+            # tentativa de reversão no banco: remover o aprovado e recriar o original
+            try:
+                s = SessionLocal()
+                if aprovado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorAprovados).get(aprovado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
+            await interaction.followup.send("Erro ao enviar a mensagem para o canal de aprovados. A ação foi revertida.", ephemeral=True)
             return
 
-        # Move registro: insere em aprovados e remove o original
-        approver_apelido = getattr(member, "display_name", str(member))
-        session = SessionLocal()
+        # Atualiza o registro aprovado com o id da mensagem enviada
         try:
-            original = session.query(FormulariosDesenvolvedor).filter_by(id_mensagem=old_message_id).first()
-            if original:
-                aprovado = FormulariosDesenvolvedorAprovados(
-                    id_usuario=int(original.id_usuario),
-                    id_mensagem=str(new_msg.id),
-                    nome=original.nome,
-                    sexo=original.sexo,
-                    genero_favorito=original.genero_favorito,
-                    plataforma_principal=original.plataforma_principal,
-                    redes_sociais=original.redes_sociais,
-                    status="aprovado",
-                    data_envio=original.data_envio,
-                    aprovado_por=approver_apelido,
-                    data_aprovacao=datetime.utcnow()
-                )
-                session.add(aprovado)
-                session.delete(original)
-                session.commit()
-        except Exception:
-            session.rollback()
-            await interaction.followup.send("Erro ao mover formulário no banco de dados.", ephemeral=True)
+            s = SessionLocal()
+            approved_rec = s.query(FormulariosDesenvolvedorAprovados).get(aprovado_id)
+            if approved_rec:
+                approved_rec.id_mensagem = str(new_msg.id)
+                s.add(approved_rec)
+                s.commit()
+        except Exception as e:
+            s.rollback()
+            print(f"Erro ao atualizar id_mensagem do formulário aprovado: {e}")
+            # tenta remover a mensagem enviada para evitar inconsistência
+            try:
+                await new_msg.delete()
+            except Exception:
+                pass
+            await interaction.followup.send("Erro ao atualizar o formulário aprovado no banco de dados.", ephemeral=True)
             return
         finally:
-            session.close()
+            s.close()
 
         # Tenta excluir a mensagem original
         try:
@@ -143,7 +233,7 @@ class BotoesFormulario(discord.ui.View):
         except Exception:
             pass
 
-        await interaction.followup.send("**Formulário Aprovado!**\n Uma mensagem foi enviada ao usuario com informações iniciais da comunidade.", ephemeral=True)
+        await interaction.followup.send("**Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade.", ephemeral=True)
 
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="rejeitar_button")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -215,7 +305,7 @@ class registrar_usuario(commands.Cog):
                 style=discord.TextStyle.short,
                 required=True,
                 min_length=1,
-                max_length=32
+                max_length=50
             )
             self.add_item(self.sexo)
             # Campo 3: Gênero de jogos favorito
@@ -231,8 +321,8 @@ class registrar_usuario(commands.Cog):
             self.plataforma_principal = discord.ui.TextInput(
                 label="Qual sua plataforma principal?",
                 style=discord.TextStyle.short,
-                required=False,
-                max_length=64,
+                required=True,
+                max_length=200,
                 placeholder="Ex: PC / PS / Xbox / Mobile / Switch"
             )
             self.add_item(self.plataforma_principal)
@@ -319,13 +409,14 @@ class registrar_usuario(commands.Cog):
             # Salva no banco de dados
             session = SessionLocal()
             try:
+                # garantir tipos/valores compatíveis com o modelo DB
                 form = FormulariosDesenvolvedor(
-                    id_usuario=int(interaction.user.id),
+                    id_usuario=str(interaction.user.id),
                     id_mensagem=str(msg.id),
                     nome=nome,
                     sexo=sexo,
                     genero_favorito=genero,
-                    plataforma_principal=plataforma,
+                    plataforma_principal=plataforma or "Não Informado",
                     redes_sociais=redes,
                     status="pendente",
                     data_envio=datetime.utcnow()
@@ -339,7 +430,7 @@ class registrar_usuario(commands.Cog):
             finally:
                 session.close()
 
-            await interaction.response.send_message("Formulário enviado com sucesso!", ephemeral=True)
+            await interaction.response.send_message("**Formulário enviado com sucesso!**", ephemeral=True)
     class Registrar_Usurario_View(discord.ui.View):
         def __init__(self, bot: commands.Bot, *, timeout: float = None):
             super().__init__(timeout=timeout)
