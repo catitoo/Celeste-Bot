@@ -5,6 +5,12 @@ from dotenv import load_dotenv, set_key
 from datetime import datetime
 from database.setup_database import SessionLocal, FormulariosDesenvolvedor, FormulariosDesenvolvedorAprovados
 
+# (novo) tenta importar a tabela de formulários ativos; se não existir, usa fallback
+try:
+    from database.setup_database import FormulariosAtivos  # type: ignore
+except Exception:
+    FormulariosAtivos = None  # fallback
+
 load_dotenv()
 
 class BotoesFormulario(discord.ui.View):
@@ -45,6 +51,14 @@ class BotoesFormulario(discord.ui.View):
             if form.status != "pendente":
                 await interaction.followup.send("Formulário já foi avaliado.", ephemeral=True)
                 return
+
+            # (novo) remove marcação de "ativo" do usuário (se a tabela existir)
+            if FormulariosAtivos is not None:
+                try:
+                    session.query(FormulariosAtivos).filter_by(id_usuario=str(form.id_usuario)).delete(synchronize_session=False)
+                except Exception:
+                    # não bloqueia a aprovação se a tabela/colunas não baterem
+                    pass
 
             # Copia os dados necessários para possível reversão
             original_data = {
@@ -263,7 +277,16 @@ class BotoesFormulario(discord.ui.View):
             if form.status != "pendente":
                 await interaction.response.send_message("Formulário já foi avaliado.", ephemeral=True)
                 return
+
             form.status = "rejeitado"
+
+            # (novo) remove marcação de "ativo" do usuário (se a tabela existir)
+            if FormulariosAtivos is not None:
+                try:
+                    session.query(FormulariosAtivos).filter_by(id_usuario=str(form.id_usuario)).delete(synchronize_session=False)
+                except Exception:
+                    pass
+
             session.commit()
         except Exception:
             session.rollback()
@@ -337,6 +360,40 @@ class registrar_usuario(commands.Cog):
             self.add_item(self.redes_sociais)
         
         async def on_submit(self, interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            user_id_int = int(interaction.user.id)
+
+            # (novo) bloqueia se o usuário já tiver um formulário aprovado
+            session = SessionLocal()
+            try:
+                ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
+                if ja_aprovado:
+                    await interaction.response.send_message(
+                        "Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                        ephemeral=True,
+                    )
+                    return
+
+                # (novo) bloqueia se já existir formulário ativo/pendente para o usuário
+                if FormulariosAtivos is not None:
+                    existente = session.query(FormulariosAtivos).filter_by(id_usuario=user_id).first()
+                else:
+                    # fallback: usa a própria tabela de formulários pendentes
+                    existente = (
+                        session.query(FormulariosDesenvolvedor)
+                        .filter_by(id_usuario=user_id, status="pendente")
+                        .first()
+                    )
+
+                if existente:
+                    await interaction.response.send_message(
+                        "Você já possui um formulário **pendente/ativo**. Aguarde a avaliação antes de enviar outro.",
+                        ephemeral=True,
+                    )
+                    return
+            finally:
+                session.close()
+
             # Coleta valores do modal
             nome = (self.nome_completo.value or "").strip()
             sexo = (self.sexo.value or "").strip()
@@ -409,7 +466,6 @@ class registrar_usuario(commands.Cog):
             # Salva no banco de dados
             session = SessionLocal()
             try:
-                # garantir tipos/valores compatíveis com o modelo DB
                 form = FormulariosDesenvolvedor(
                     id_usuario=str(interaction.user.id),
                     id_mensagem=str(msg.id),
@@ -422,6 +478,15 @@ class registrar_usuario(commands.Cog):
                     data_envio=datetime.utcnow()
                 )
                 session.add(form)
+
+                # (novo/opcional) cria marcação de "ativo" (ajuste os campos conforme seu modelo)
+                if FormulariosAtivos is not None:
+                    try:
+                        session.add(FormulariosAtivos(id_usuario=user_id))
+                    except Exception:
+                        # não quebra caso o modelo exija colunas extras
+                        pass
+
                 session.commit()
             except Exception:
                 session.rollback()
