@@ -1,6 +1,12 @@
 import discord
 from config import bot, TOKEN  # Importa do arquivo config.py
 from database.setup_database import voip_list_ativos, voip_remover_canal_ativo
+from database.setup_database import SessionLocal, FormulariosDesenvolvedor
+# tenta importar a tabela FormulariosAtivos; se não existir, usa fallback
+try:
+    from database.setup_database import FormulariosAtivos  # type: ignore
+except Exception:
+    FormulariosAtivos = None
 import os
 import logging
 
@@ -50,6 +56,62 @@ async def on_ready():
                     pass
 
         await _limpar_voips_vazios()
+
+        # Limpa entradas de formulários cujo message_id não exista mais no canal configurado
+        async def _limpar_formularios_deletados():
+            canal_env = os.getenv("FORMULARIO_REGISTRAR_DESENVOLVEDOR_CHANNEL_ID")
+            if not canal_env:
+                return
+            try:
+                canal_id = int(canal_env)
+            except ValueError:
+                return
+
+            try:
+                channel = bot.get_channel(canal_id) or await bot.fetch_channel(canal_id)
+            except Exception:
+                channel = None
+
+            if channel is None:
+                return
+
+            # coleta ids de mensagens existentes no canal
+            existing_ids = set()
+            try:
+                async for m in channel.history(limit=None):
+                    existing_ids.add(str(m.id))
+            except Exception:
+                # falha ao iterar o histórico, cancela limpeza
+                return
+
+            # decide qual modelo usar: FormulariosAtivos se existir, senão FormulariosDesenvolvedor
+            model = FormulariosAtivos if FormulariosAtivos is not None else FormulariosDesenvolvedor
+
+            session = SessionLocal()
+            try:
+                rows = session.query(model).all()
+                removed = 0
+                for r in rows:
+                    msg_id = getattr(r, "id_mensagem", None)
+                    if not msg_id:
+                        # se o modelo não possuir campo id_mensagem, pula
+                        continue
+                    if str(msg_id) not in existing_ids:
+                        try:
+                            session.query(model).filter_by(id_mensagem=str(msg_id)).delete(synchronize_session=False)
+                            removed += 1
+                        except Exception:
+                            pass
+                if removed:
+                    try:
+                        session.commit()
+                        print(f"Removidas {removed} entradas de formulários com mensagens ausentes no canal {canal_id}.")
+                    except Exception:
+                        session.rollback()
+            finally:
+                session.close()
+
+        await _limpar_formularios_deletados()
         await bot.tree.sync()  # Sincroniza comandos de barra
         print("Todos os comandos foram sincronizados com sucesso!")
 

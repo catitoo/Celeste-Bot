@@ -73,7 +73,7 @@ class BotoesFormulario(discord.ui.View):
         if not isinstance(member, discord.Member):
             member = interaction.guild.get_member(member.id)
         if not member or not any(role.id == admin_cargo_id for role in member.roles):
-            await interaction.response.send_message("Você não tem permissão para aprovar.", ephemeral=True)
+            await interaction.response.send_message("Você não tem permissão para fazer isso.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -347,9 +347,22 @@ class BotoesFormulario(discord.ui.View):
 
         member = interaction.user
         if not isinstance(member, discord.Member):
-            member = interaction.guild.get_member(member.id)
-        if not member or not any(role.id == admin_cargo_id for role in member.roles):
-            await interaction.response.send_message("Você não tem permissão para rejeitar.", ephemeral=True)
+            member = None
+            # tenta resolver via guild (get_member ou fetch_member)
+            guild = interaction.guild or (interaction.message.guild if getattr(interaction, "message", None) else None)
+            if guild is not None:
+                try:
+                    member = guild.get_member(interaction.user.id)
+                except Exception:
+                    member = None
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(interaction.user.id)
+                    except Exception:
+                        member = None
+
+        if not member or not any(role.id == admin_cargo_id for role in getattr(member, "roles", [])):
+            await interaction.response.send_message("Você não tem permissão para fazer isso.", ephemeral=True)
             return
 
         reviewer_apelido = getattr(member, "display_name", str(member))
@@ -371,6 +384,35 @@ class BotoesFormulario(discord.ui.View):
         reviewer_apelido: str,
         motivo: str,
     ):
+        # Verifica se quem submeteu o modal possui o cargo de administrador
+        admin_cargo_id = os.getenv("ADMINISTRADOR_CARGO_ID")
+        if not admin_cargo_id:
+            try:
+                await interaction.response.send_message("Cargo administrador não configurado.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        try:
+            admin_cargo_id = int(admin_cargo_id)
+        except ValueError:
+            try:
+                await interaction.response.send_message("Cargo administrador inválido.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            try:
+                member = interaction.guild.get_member(member.id)
+            except Exception:
+                member = None
+        if not member or not any(role.id == admin_cargo_id for role in getattr(member, "roles", [])):
+            try:
+                await interaction.response.send_message("Você não tem permissão para rejeitar.", ephemeral=True)
+            except Exception:
+                pass
+            return
         old_message_id = str(message_id)
 
         # Busca a mensagem original (modal submit não tem interaction.message)
@@ -778,7 +820,7 @@ class registrar_usuario(commands.Cog):
             finally:
                 session.close()
 
-            await interaction.response.send_message("**Formulário enviado com sucesso!\nAgora aguarde até que um membro da nossa equipe analise seu formulario.**", ephemeral=True)
+            await interaction.response.send_message("**Formulário enviado com sucesso!**\nAgora aguarde até que um membro da nossa equipe analise seu formulario.", ephemeral=True)
     class Registrar_Usurario_View(discord.ui.View):
         def __init__(self, bot: commands.Bot, *, timeout: float = None):
             super().__init__(timeout=timeout)
