@@ -3,7 +3,7 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv, set_key
 from datetime import datetime
-from database.setup_database import SessionLocal, FormulariosDesenvolvedor, FormulariosDesenvolvedorAprovados
+from database.setup_database import SessionLocal, FormulariosDesenvolvedor, FormulariosDesenvolvedorAprovados, FormulariosDesenvolvedorRejeitados
 
 # (novo) tenta importar a tabela de formulários ativos; se não existir, usa fallback
 try:
@@ -268,17 +268,20 @@ class BotoesFormulario(discord.ui.View):
             await interaction.response.send_message("Você não tem permissão para rejeitar.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+
+        old_message_id = str(interaction.message.id)
+
+        # Busca o formulário original e valida
         session = SessionLocal()
         try:
-            form = session.query(FormulariosDesenvolvedor).filter_by(id_mensagem=str(interaction.message.id)).first()
+            form = session.query(FormulariosDesenvolvedor).filter_by(id_mensagem=old_message_id).first()
             if not form:
-                await interaction.response.send_message("Formulário não encontrado.", ephemeral=True)
+                await interaction.followup.send("Formulário não encontrado.", ephemeral=True)
                 return
             if form.status != "pendente":
-                await interaction.response.send_message("Formulário já foi avaliado.", ephemeral=True)
+                await interaction.followup.send("Formulário já foi avaliado.", ephemeral=True)
                 return
-
-            form.status = "rejeitado"
 
             # (novo) remove marcação de "ativo" do usuário (se a tabela existir)
             if FormulariosAtivos is not None:
@@ -287,18 +290,188 @@ class BotoesFormulario(discord.ui.View):
                 except Exception:
                     pass
 
+            # Copia os dados necessários para possível reversão
+            original_data = {
+                "id_usuario": form.id_usuario,
+                "id_mensagem": form.id_mensagem,
+                "nome": form.nome,
+                "sexo": form.sexo,
+                "genero_favorito": form.genero_favorito,
+                "plataforma_principal": form.plataforma_principal,
+                "redes_sociais": form.redes_sociais,
+                "status": form.status,
+                "data_envio": form.data_envio,
+            }
+
+            # Cria registro rejeitado (sem id_mensagem por enquanto) e remove o original
+            reviewer_apelido = getattr(member, "display_name", str(member))
+            rejeitado = FormulariosDesenvolvedorRejeitados(
+                id_usuario=int(form.id_usuario),
+                id_mensagem="",  # será atualizado após envio da mensagem
+                nome=form.nome,
+                sexo=form.sexo,
+                genero_favorito=form.genero_favorito,
+                plataforma_principal=form.plataforma_principal,
+                redes_sociais=form.redes_sociais,
+                status="rejeitado",
+                data_envio=form.data_envio,
+                rejeitado_por=reviewer_apelido,
+                data_rejeicao=datetime.utcnow(),
+            )
+            session.add(rejeitado)
+            session.delete(form)
             session.commit()
-        except Exception:
+            rejeitado_id = getattr(rejeitado, "id", None)
+        except Exception as e:
             session.rollback()
-            await interaction.response.send_message("Erro ao atualizar no banco de dados.", ephemeral=True)
+            session.close()
+            print(f"Erro ao mover formulário rejeitado no banco de dados: {e}")
+            await interaction.followup.send("Erro ao mover formulário no banco de dados.", ephemeral=True)
             return
         finally:
             session.close()
 
-        for child in self.children:
-            child.disabled = True
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message("Formulário rejeitado.", ephemeral=True)
+        # Preparar embed/conteúdo a enviar (reuso do embed original do message)
+        reviewer_apelido = getattr(member, "display_name", str(member))
+        embed = interaction.message.embeds[0] if interaction.message.embeds else None
+        content = interaction.message.content if not embed else None
+
+        rejected_channel_env = os.getenv("FORMULARIO_REJEITADO_DESENVOLVEDOR_CHANNEL_ID")
+        if not rejected_channel_env:
+            await interaction.followup.send("Canal de rejeitados não configurado.", ephemeral=True)
+            # reverter DB: remover rejeitado criado e recriar o original
+            try:
+                s = SessionLocal()
+                if rejeitado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
+            return
+        try:
+            rejected_channel_id = int(rejected_channel_env)
+        except ValueError:
+            await interaction.followup.send("ID do canal de rejeitados inválido.", ephemeral=True)
+            # reverter DB
+            try:
+                s = SessionLocal()
+                if rejeitado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
+            return
+
+        rejected_channel = self.bot.get_channel(rejected_channel_id)
+        if rejected_channel is None:
+            await interaction.followup.send("Não encontrei o canal de rejeitados configurado.", ephemeral=True)
+            # reverter DB
+            try:
+                s = SessionLocal()
+                if rejeitado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
+            return
+
+        # Envia a mensagem ao canal de rejeitados (somente se DB já foi movido com sucesso)
+        try:
+            if embed:
+                new_embed = discord.Embed(
+                    title=embed.title if getattr(embed, "title", None) else None,
+                    description=embed.description if getattr(embed, "description", None) else None,
+                    colour=discord.Colour.from_str("#ff4040"),
+                )
+                for f in embed.fields:
+                    new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
+                new_embed.add_field(name="\u200b", value="", inline=False)
+                new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
+                if getattr(embed, "thumbnail", None) and getattr(embed.thumbnail, "url", None):
+                    new_embed.set_thumbnail(url=embed.thumbnail.url)
+                if getattr(embed, "author", None) and getattr(embed.author, "name", None):
+                    try:
+                        new_embed.set_author(name=embed.author.name, icon_url=getattr(embed.author, "icon_url", None))
+                    except Exception:
+                        pass
+                if getattr(embed, "footer", None) and getattr(embed.footer, "text", None):
+                    new_embed.set_footer(text=embed.footer.text)
+                new_embed.set_image(url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png")
+            else:
+                new_embed = discord.Embed(colour=discord.Colour.from_str("#ff4040"))
+                new_embed.add_field(name="\u200b", value="", inline=False)
+                new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
+                new_embed.set_image(url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png")
+
+            new_msg = await rejected_channel.send(content=content, embed=new_embed)
+        except Exception as e:
+            print(f"Erro ao enviar a mensagem para o canal de rejeitados: {e}")
+            # tentativa de reversão no banco: remover o rejeitado e recriar o original
+            try:
+                s = SessionLocal()
+                if rejeitado_id is not None:
+                    to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
+                    if to_del:
+                        s.delete(to_del)
+                recreated = FormulariosDesenvolvedor(**original_data)
+                s.add(recreated)
+                s.commit()
+            except Exception:
+                s.rollback()
+            finally:
+                s.close()
+            await interaction.followup.send(
+                "Erro ao enviar a mensagem para o canal de rejeitados. A ação foi revertida.",
+                ephemeral=True,
+            )
+            return
+
+        # Atualiza o registro rejeitado com o id da mensagem enviada
+        try:
+            s = SessionLocal()
+            rejected_rec = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
+            if rejected_rec:
+                rejected_rec.id_mensagem = str(new_msg.id)
+                s.add(rejected_rec)
+                s.commit()
+        except Exception as e:
+            s.rollback()
+            print(f"Erro ao atualizar id_mensagem do formulário rejeitado: {e}")
+            # tenta remover a mensagem enviada para evitar inconsistência
+            try:
+                await new_msg.delete()
+            except Exception:
+                pass
+            await interaction.followup.send("Erro ao atualizar o formulário rejeitado no banco de dados.", ephemeral=True)
+            return
+        finally:
+            s.close()
+
+        # Tenta excluir a mensagem original
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+        await interaction.followup.send("**Formulário Rejeitado!**", ephemeral=True)
 class registrar_usuario(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
