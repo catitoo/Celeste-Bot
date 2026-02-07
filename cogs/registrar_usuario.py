@@ -327,7 +327,42 @@ class BotoesFormulario(discord.ui.View):
                     print(f"Erro ao atualizar cargos do usuário aprovado: {e}")
                     cargo_aviso = "Erro ao atualizar os cargos do usuário aprovado."
 
-        msg = "**Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade."
+                # Enviar mensagem ao usuário aprovado (DM)
+                try:
+                    target_user_id = int(original_data.get("id_usuario") or 0)
+                    user_obj = None
+                    # se encontramos o membro no guild, preferimos usar esse objeto
+                    if guild is not None and 'target_member' in locals() and target_member is not None:
+                        user_obj = target_member
+                    else:
+                        try:
+                            user_obj = self.bot.get_user(target_user_id) or await self.bot.fetch_user(target_user_id)
+                        except Exception:
+                            user_obj = None
+
+                    if user_obj is not None:
+                        membro_mention = getattr(user_obj, 'mention', f"<@{target_user_id}>")
+                        embed_aprovado = discord.Embed(
+                            title="<:formulario_aprovado:1469811985364291634> Formulário Aprovado!",
+                            description=(
+                                f"Parabéns {membro_mention}, seu formulário para se tornar um membro da nossa comunidade foi **aprovado**! <a:gg_gif_1:1469820399159083161>\n\n"
+                                "Seja muito bem-vindo(a)! Agora você tem acesso aos canais exclusivos para membros.\n"
+                                "Sinta-se à vontade para interagir, tirar dúvidas e participar das atividades.\n\n"
+                                "<:aviso_1:1469818296848093286> **Próximo passo:** Leia as regras da comunidade e as informações presentes nos seguintes canais:\n 1. https://discord.com/channels/1452819645575991409/1452830800818212874\n 2. https://discord.com/channels/1452819645575991409/1452932256887865498\n\n"
+                                "<a:anuncio_1:1469811972114616399> É muito **importante** fazer isso! Pois fazer isso garante um melhor ambiente de desenvolvimento para todos!"
+                            ),
+                            colour=discord.Colour.from_str("#00ff40")
+                        )
+                        embed_aprovado.set_image(url="https://i.ibb.co/gZn6mfHS/formulario-aprovado-imagem.png")
+                        try:
+                            await user_obj.send(embed=embed_aprovado)
+                        except Exception:
+                            # não bloquear a aprovação se DM falhar
+                            pass
+                except Exception:
+                    pass
+
+                msg = "<:membro_aprovado:1469811980117344502> **Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade."
         if cargo_aviso:
             msg += f"\n\n**Aviso:** {cargo_aviso}"
 
@@ -694,7 +729,7 @@ class registrar_usuario(commands.Cog):
                 ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
                 if ja_aprovado:
                     await interaction.response.send_message(
-                        "Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
                         ephemeral=True,
                     )
                     return
@@ -712,7 +747,7 @@ class registrar_usuario(commands.Cog):
 
                 if existente:
                     await interaction.response.send_message(
-                        "Você já possui um formulário **pendente/ativo**. Aguarde a avaliação antes de enviar outro.",
+                        "<:formulario_pendente:1469811982549913670> Você já possui um formulário em **análise**. Você será notificado quando houver uma atualização sobre seu formulário.",
                         ephemeral=True,
                     )
                     return
@@ -828,6 +863,37 @@ class registrar_usuario(commands.Cog):
 
         @discord.ui.button(label="Registrar-se", style=discord.ButtonStyle.primary, custom_id="registrar_se_button")
         async def registrar_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            user_id = str(interaction.user.id)
+            user_id_int = int(interaction.user.id)
+
+            session = SessionLocal()
+            try:
+                ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
+                if ja_aprovado:
+                    await interaction.response.send_message(
+                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                        ephemeral=True,
+                    )
+                    return
+
+                if FormulariosAtivos is not None:
+                    existente = session.query(FormulariosAtivos).filter_by(id_usuario=user_id).first()
+                else:
+                    existente = (
+                        session.query(FormulariosDesenvolvedor)
+                        .filter_by(id_usuario=user_id, status="pendente")
+                        .first()
+                    )
+
+                if existente:
+                    await interaction.response.send_message(
+                        "<:formulario_pendente:1469811982549913670> Você já possui um formulário em **análise**. Você será notificado quando houver uma atualização sobre seu formulário.",
+                        ephemeral=True,
+                    )
+                    return
+            finally:
+                session.close()
+
             modal = registrar_usuario.Registrar_Usurario_Modal(self.bot)
             await interaction.response.send_modal(modal)
 
@@ -881,6 +947,38 @@ class registrar_usuario(commands.Cog):
                 return
             if interaction.response.is_done():
                 return
+
+            user_id = str(interaction.user.id)
+            user_id_int = int(interaction.user.id)
+
+            session = SessionLocal()
+            try:
+                ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
+                if ja_aprovado:
+                    await interaction.response.send_message(
+                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                        ephemeral=True,
+                    )
+                    return
+
+                if FormulariosAtivos is not None:
+                    existente = session.query(FormulariosAtivos).filter_by(id_usuario=user_id).first()
+                else:
+                    existente = (
+                        session.query(FormulariosDesenvolvedor)
+                        .filter_by(id_usuario=user_id, status="pendente")
+                        .first()
+                    )
+
+                if existente:
+                    await interaction.response.send_message(
+                        "<:formulario_pendente:1469811982549913670> Você já possui um formulário em **análise**. Você será notificado quando houver uma atualização sobre seu formulário.",
+                        ephemeral=True,
+                    )
+                    return
+            finally:
+                session.close()
+
             modal = registrar_usuario.Registrar_Usurario_Modal(self.bot)
             await interaction.response.send_modal(modal)
         except Exception:
@@ -890,6 +988,25 @@ class registrar_usuario(commands.Cog):
             except Exception:
                 pass
             raise
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        """Ao detectar que um membro saiu do servidor, remove qualquer formulário aprovado dele."""
+        try:
+            s = SessionLocal()
+            try:
+                aprovados = s.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=int(member.id)).all()
+                if aprovados:
+                    for a in aprovados:
+                        s.delete(a)
+                    s.commit()
+            except Exception as e:
+                s.rollback()
+                print(f"[registrar_usuario] Erro ao remover formulário aprovado ao sair do servidor: {e}")
+            finally:
+                s.close()
+        except Exception:
+            pass
 
     @discord.app_commands.command(name="set-canal-registro", description="Define o canal para o menu de registro e envia o menu no canal.")
     async def set_canal_registro(self, interaction: discord.Interaction):

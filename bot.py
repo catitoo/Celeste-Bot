@@ -59,7 +59,7 @@ async def on_ready():
 
         # Limpa entradas de formulários cujo message_id não exista mais no canal configurado
         async def _limpar_formularios_deletados():
-            canal_env = os.getenv("FORMULARIO_REGISTRAR_DESENVOLVEDOR_CHANNEL_ID")
+            canal_env = os.getenv("FORMULARIO_PENDENTE_DESENVOLVEDOR_CHANNEL_ID")
             if not canal_env:
                 return
             try:
@@ -75,15 +75,6 @@ async def on_ready():
             if channel is None:
                 return
 
-            # coleta ids de mensagens existentes no canal
-            existing_ids = set()
-            try:
-                async for m in channel.history(limit=None):
-                    existing_ids.add(str(m.id))
-            except Exception:
-                # falha ao iterar o histórico, cancela limpeza
-                return
-
             # decide qual modelo usar: FormulariosAtivos se existir, senão FormulariosDesenvolvedor
             model = FormulariosAtivos if FormulariosAtivos is not None else FormulariosDesenvolvedor
 
@@ -94,14 +85,25 @@ async def on_ready():
                 for r in rows:
                     msg_id = getattr(r, "id_mensagem", None)
                     if not msg_id:
-                        # se o modelo não possuir campo id_mensagem, pula
+                        # se não houver id de mensagem, não tentamos deletar aqui
                         continue
-                    if str(msg_id) not in existing_ids:
+                    # tenta buscar a mensagem especificamente no canal configurado
+                    try:
                         try:
+                            await channel.fetch_message(int(msg_id))
+                            # se foi encontrada, mantém o registro
+                            continue
+                        except discord.NotFound:
+                            # mensagem não existe no canal: apagar do DB
                             session.query(model).filter_by(id_mensagem=str(msg_id)).delete(synchronize_session=False)
                             removed += 1
                         except Exception:
-                            pass
+                            # outro erro ao buscar a mensagem: pula esse registro para evitar remoção indevida
+                            continue
+                    except Exception:
+                        # erros inesperados no delete/fetch: pula
+                        continue
+
                 if removed:
                     try:
                         session.commit()
