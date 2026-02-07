@@ -67,13 +67,23 @@ class comandos(commands.Cog):
                 channel = i.channel
                 apagadas = 0
 
+                # DM não suporta bulk delete. Se deletarmos muito rápido,
+                # o Discord retorna 429 e o discord.py loga warnings.
+                # Um pequeno delay fixo evita estourar o rate limit.
+                delete_delay_seconds = 0.75
+
                 async for msg in channel.history(limit=None, oldest_first=False):
                     if msg.author and msg.author.id == self.bot.user.id:
                         try:
                             await msg.delete()
                             apagadas += 1
+                            await asyncio.sleep(delete_delay_seconds)
+                        except (discord.NotFound, discord.Forbidden):
+                            # Mensagem já foi apagada ou não temos permissão.
+                            await asyncio.sleep(delete_delay_seconds)
                         except discord.HTTPException:
-                            await asyncio.sleep(0.4)
+                            # Em caso de falha (incluindo rate limit), desacelera um pouco mais.
+                            await asyncio.sleep(max(1.25, delete_delay_seconds))
 
                 embed_final = discord.Embed(
                     title="Pronto.",
