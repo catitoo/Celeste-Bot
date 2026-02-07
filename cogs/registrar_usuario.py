@@ -286,7 +286,52 @@ class BotoesFormulario(discord.ui.View):
         except Exception:
             pass
 
-        await interaction.followup.send("**Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade.", ephemeral=True)
+        # Atualiza cargos do usuário aprovado
+        cargo_aviso = None
+        guild = interaction.guild
+        if guild is not None:
+            visitante_env = os.getenv("VISITANTE_CARGO_ID")
+            membro_env = os.getenv("MEMBRO_CARGO_ID")
+            try:
+                visitante_cargo_id = int(visitante_env) if visitante_env else 0
+                membro_cargo_id = int(membro_env) if membro_env else 0
+            except ValueError:
+                visitante_cargo_id = 0
+                membro_cargo_id = 0
+                cargo_aviso = "IDs de cargo (VISITANTE_CARGO_ID/MEMBRO_CARGO_ID) inválidos no .env."
+
+            if (visitante_cargo_id or membro_cargo_id) and cargo_aviso is None:
+                try:
+                    target_user_id = int(original_data.get("id_usuario") or 0)
+                    target_member = guild.get_member(target_user_id) if target_user_id else None
+                    if target_member is None and target_user_id:
+                        try:
+                            target_member = await guild.fetch_member(target_user_id)
+                        except Exception:
+                            target_member = None
+
+                    if target_member is None:
+                        cargo_aviso = "Não consegui encontrar o usuário no servidor para atualizar os cargos."
+                    else:
+                        visitante_role = guild.get_role(visitante_cargo_id) if visitante_cargo_id else None
+                        membro_role = guild.get_role(membro_cargo_id) if membro_cargo_id else None
+
+                        # Remove visitante (se existir) e adiciona membro (se existir)
+                        if visitante_role and visitante_role in target_member.roles:
+                            await target_member.remove_roles(visitante_role, reason="Formulário aprovado")
+                        if membro_role and membro_role not in target_member.roles:
+                            await target_member.add_roles(membro_role, reason="Formulário aprovado")
+                except discord.Forbidden:
+                    cargo_aviso = "Sem permissão para gerenciar cargos (verifique 'Gerenciar Cargos' e hierarquia)."
+                except Exception as e:
+                    print(f"Erro ao atualizar cargos do usuário aprovado: {e}")
+                    cargo_aviso = "Erro ao atualizar os cargos do usuário aprovado."
+
+        msg = "**Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade."
+        if cargo_aviso:
+            msg += f"\n\n**Aviso:** {cargo_aviso}"
+
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="rejeitar_button")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -733,7 +778,7 @@ class registrar_usuario(commands.Cog):
             finally:
                 session.close()
 
-            await interaction.response.send_message("**Formulário enviado com sucesso!**", ephemeral=True)
+            await interaction.response.send_message("**Formulário enviado com sucesso!\nAgora aguarde até que um membro da nossa equipe analise seu formulario.**", ephemeral=True)
     class Registrar_Usurario_View(discord.ui.View):
         def __init__(self, bot: commands.Bot, *, timeout: float = None):
             super().__init__(timeout=timeout)
