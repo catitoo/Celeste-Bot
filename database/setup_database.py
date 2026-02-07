@@ -71,6 +71,52 @@ class VoipPreferencias(Base):
         UniqueConstraint("id_servidor", "id_usuario", name="uq_voip_prefs_servidor_usuario"),
     )
 
+class FormulariosDesenvolvedor(Base):
+    __tablename__ = "formularios_desenvolvedor"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Text, index=True, unique=True, nullable=False)
+    id_mensagem = Column(Text, index=True, nullable=False)
+    nome = Column(Text, nullable=False)
+    sexo = Column(Text, nullable=False)
+    genero_favorito = Column(Text, nullable=False)
+    plataforma_principal = Column(Text, nullable=False)
+    redes_sociais = Column(Text, nullable=True)
+    status = Column(String(50), default="pendente", nullable=False)
+    data_envio = Column(DateTime, default=datetime.utcnow)
+
+class FormulariosDesenvolvedorAprovados(Base):
+    __tablename__ = "formularios_desenvolvedor_aprovados"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    id_mensagem = Column(String(100), index=True, nullable=False)
+    nome = Column(String(150), nullable=False)
+    sexo = Column(String(32), nullable=False)
+    genero_favorito = Column(String(100), nullable=False)
+    plataforma_principal = Column(String(100), nullable=False)
+    redes_sociais = Column(Text, nullable=True)
+    status = Column(String(50), default="aprovado", nullable=False)
+    data_envio = Column(DateTime, default=datetime.utcnow, nullable=True)
+    aprovado_por = Column(Text, index=True, nullable=False)
+    data_aprovacao = Column(DateTime, default=datetime.utcnow, nullable=True)
+
+class FormulariosDesenvolvedorRejeitados(Base):
+    __tablename__ = "formularios_desenvolvedor_rejeitados"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    id_mensagem = Column(String(100), index=True, nullable=False)
+    nome = Column(String(150), nullable=False)
+    sexo = Column(String(32), nullable=False)
+    genero_favorito = Column(String(100), nullable=False)
+    plataforma_principal = Column(String(100), nullable=False)
+    redes_sociais = Column(Text, nullable=True)
+    status = Column(String(50), default="rejeitado", nullable=False)
+    data_envio = Column(DateTime, default=datetime.utcnow, nullable=True)
+    rejeitado_por = Column(Text, index=True, nullable=False)
+    data_rejeicao = Column(DateTime, default=datetime.utcnow, nullable=True)
+
 # Função para criar as tabelas no banco de dados
 def voip_salvar_canal_ativo(id_servidor: int, id_voip: int, id_lider: int):
     session = SessionLocal()
