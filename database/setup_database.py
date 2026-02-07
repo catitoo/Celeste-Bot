@@ -112,6 +112,7 @@ class FormulariosDesenvolvedorRejeitados(Base):
     genero_favorito = Column(String(100), nullable=False)
     plataforma_principal = Column(String(100), nullable=False)
     redes_sociais = Column(Text, nullable=True)
+    motivo = Column(Text, nullable=True)
     status = Column(String(50), default="rejeitado", nullable=False)
     data_envio = Column(DateTime, default=datetime.utcnow, nullable=True)
     rejeitado_por = Column(Text, index=True, nullable=False)

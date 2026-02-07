@@ -13,6 +13,45 @@ except Exception:
 
 load_dotenv()
 
+
+class MotivoRejeicaoModal(discord.ui.Modal):
+    def __init__(
+        self,
+        parent_view: "BotoesFormulario",
+        bot: commands.Bot,
+        message_id: int,
+        channel_id: int,
+        reviewer_display_name: str,
+    ):
+        super().__init__(title="Rejeitar Formulário")
+        self.parent_view = parent_view
+        self.bot = bot
+        self.message_id = int(message_id)
+        self.channel_id = int(channel_id)
+        self.reviewer_display_name = reviewer_display_name
+
+        self.motivo = discord.ui.TextInput(
+            label="Motivo da Rejeição (Opcional)",
+            style=discord.TextStyle.long,
+            required=False,
+            max_length=500,
+        )
+        self.add_item(self.motivo)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        motivo_txt = (self.motivo.value or "").strip()
+        if not motivo_txt:
+            motivo_txt = "Não Informado"
+
+        await interaction.response.defer(ephemeral=True)
+        await self.parent_view._process_rejection(
+            interaction,
+            message_id=self.message_id,
+            channel_id=self.channel_id,
+            reviewer_apelido=self.reviewer_display_name,
+            motivo=motivo_txt,
+        )
+
 class BotoesFormulario(discord.ui.View):
     def __init__(self, bot: commands.Bot, *, timeout: float = None):
         super().__init__(timeout=timeout)
@@ -268,9 +307,48 @@ class BotoesFormulario(discord.ui.View):
             await interaction.response.send_message("Você não tem permissão para rejeitar.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        reviewer_apelido = getattr(member, "display_name", str(member))
+        modal = MotivoRejeicaoModal(
+            parent_view=self,
+            bot=self.bot,
+            message_id=int(interaction.message.id),
+            channel_id=int(interaction.channel.id),
+            reviewer_display_name=reviewer_apelido,
+        )
+        await interaction.response.send_modal(modal)
 
-        old_message_id = str(interaction.message.id)
+    async def _process_rejection(
+        self,
+        interaction: discord.Interaction,
+        *,
+        message_id: int,
+        channel_id: int,
+        reviewer_apelido: str,
+        motivo: str,
+    ):
+        old_message_id = str(message_id)
+
+        # Busca a mensagem original (modal submit não tem interaction.message)
+        source_channel = self.bot.get_channel(int(channel_id))
+        if source_channel is None:
+            try:
+                source_channel = await self.bot.fetch_channel(int(channel_id))
+            except Exception:
+                source_channel = None
+        if source_channel is None:
+            await interaction.followup.send("Não encontrei o canal original do formulário.", ephemeral=True)
+            return
+
+        try:
+            source_message = await source_channel.fetch_message(int(message_id))
+        except Exception:
+            source_message = None
+
+        embed = source_message.embeds[0] if (source_message and source_message.embeds) else None
+        content = source_message.content if (source_message and not embed) else None
+
+        motivo_block = motivo.replace("```", "` ` `")
+        motivo_block = f"```{motivo_block}```"
 
         # Busca o formulário original e valida
         session = SessionLocal()
@@ -283,14 +361,13 @@ class BotoesFormulario(discord.ui.View):
                 await interaction.followup.send("Formulário já foi avaliado.", ephemeral=True)
                 return
 
-            # (novo) remove marcação de "ativo" do usuário (se a tabela existir)
+            # remove marcação de "ativo" do usuário (se a tabela existir)
             if FormulariosAtivos is not None:
                 try:
                     session.query(FormulariosAtivos).filter_by(id_usuario=str(form.id_usuario)).delete(synchronize_session=False)
                 except Exception:
                     pass
 
-            # Copia os dados necessários para possível reversão
             original_data = {
                 "id_usuario": form.id_usuario,
                 "id_mensagem": form.id_mensagem,
@@ -303,16 +380,15 @@ class BotoesFormulario(discord.ui.View):
                 "data_envio": form.data_envio,
             }
 
-            # Cria registro rejeitado (sem id_mensagem por enquanto) e remove o original
-            reviewer_apelido = getattr(member, "display_name", str(member))
             rejeitado = FormulariosDesenvolvedorRejeitados(
                 id_usuario=int(form.id_usuario),
-                id_mensagem="",  # será atualizado após envio da mensagem
+                id_mensagem="",
                 nome=form.nome,
                 sexo=form.sexo,
                 genero_favorito=form.genero_favorito,
                 plataforma_principal=form.plataforma_principal,
                 redes_sociais=form.redes_sociais,
+                motivo=motivo,
                 status="rejeitado",
                 data_envio=form.data_envio,
                 rejeitado_por=reviewer_apelido,
@@ -331,23 +407,16 @@ class BotoesFormulario(discord.ui.View):
         finally:
             session.close()
 
-        # Preparar embed/conteúdo a enviar (reuso do embed original do message)
-        reviewer_apelido = getattr(member, "display_name", str(member))
-        embed = interaction.message.embeds[0] if interaction.message.embeds else None
-        content = interaction.message.content if not embed else None
-
         rejected_channel_env = os.getenv("FORMULARIO_REJEITADO_DESENVOLVEDOR_CHANNEL_ID")
         if not rejected_channel_env:
             await interaction.followup.send("Canal de rejeitados não configurado.", ephemeral=True)
-            # reverter DB: remover rejeitado criado e recriar o original
             try:
                 s = SessionLocal()
                 if rejeitado_id is not None:
                     to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
                     if to_del:
                         s.delete(to_del)
-                recreated = FormulariosDesenvolvedor(**original_data)
-                s.add(recreated)
+                s.add(FormulariosDesenvolvedor(**original_data))
                 s.commit()
             except Exception:
                 s.rollback()
@@ -358,15 +427,13 @@ class BotoesFormulario(discord.ui.View):
             rejected_channel_id = int(rejected_channel_env)
         except ValueError:
             await interaction.followup.send("ID do canal de rejeitados inválido.", ephemeral=True)
-            # reverter DB
             try:
                 s = SessionLocal()
                 if rejeitado_id is not None:
                     to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
                     if to_del:
                         s.delete(to_del)
-                recreated = FormulariosDesenvolvedor(**original_data)
-                s.add(recreated)
+                s.add(FormulariosDesenvolvedor(**original_data))
                 s.commit()
             except Exception:
                 s.rollback()
@@ -377,15 +444,13 @@ class BotoesFormulario(discord.ui.View):
         rejected_channel = self.bot.get_channel(rejected_channel_id)
         if rejected_channel is None:
             await interaction.followup.send("Não encontrei o canal de rejeitados configurado.", ephemeral=True)
-            # reverter DB
             try:
                 s = SessionLocal()
                 if rejeitado_id is not None:
                     to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
                     if to_del:
                         s.delete(to_del)
-                recreated = FormulariosDesenvolvedor(**original_data)
-                s.add(recreated)
+                s.add(FormulariosDesenvolvedor(**original_data))
                 s.commit()
             except Exception:
                 s.rollback()
@@ -393,18 +458,19 @@ class BotoesFormulario(discord.ui.View):
                 s.close()
             return
 
-        # Envia a mensagem ao canal de rejeitados (somente se DB já foi movido com sucesso)
+        # Envia a mensagem ao canal de rejeitados
         try:
             if embed:
                 new_embed = discord.Embed(
                     title=embed.title if getattr(embed, "title", None) else None,
                     description=embed.description if getattr(embed, "description", None) else None,
-                    colour=discord.Colour.from_str("#ff4040"),
+                    colour=discord.Colour.from_str("#d40000"),
                 )
                 for f in embed.fields:
                     new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
                 new_embed.add_field(name="\u200b", value="", inline=False)
                 new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
+                new_embed.add_field(name="**Motivo:**", value=motivo_block, inline=False)
                 if getattr(embed, "thumbnail", None) and getattr(embed.thumbnail, "url", None):
                     new_embed.set_thumbnail(url=embed.thumbnail.url)
                 if getattr(embed, "author", None) and getattr(embed.author, "name", None):
@@ -416,23 +482,22 @@ class BotoesFormulario(discord.ui.View):
                     new_embed.set_footer(text=embed.footer.text)
                 new_embed.set_image(url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png")
             else:
-                new_embed = discord.Embed(colour=discord.Colour.from_str("#ff4040"))
+                new_embed = discord.Embed(colour=discord.Colour.from_str("#d40000"))
                 new_embed.add_field(name="\u200b", value="", inline=False)
                 new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
+                new_embed.add_field(name="**Motivo:**", value=motivo_block, inline=False)
                 new_embed.set_image(url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png")
 
             new_msg = await rejected_channel.send(content=content, embed=new_embed)
         except Exception as e:
             print(f"Erro ao enviar a mensagem para o canal de rejeitados: {e}")
-            # tentativa de reversão no banco: remover o rejeitado e recriar o original
             try:
                 s = SessionLocal()
                 if rejeitado_id is not None:
                     to_del = s.query(FormulariosDesenvolvedorRejeitados).get(rejeitado_id)
                     if to_del:
                         s.delete(to_del)
-                recreated = FormulariosDesenvolvedor(**original_data)
-                s.add(recreated)
+                s.add(FormulariosDesenvolvedor(**original_data))
                 s.commit()
             except Exception:
                 s.rollback()
@@ -455,7 +520,6 @@ class BotoesFormulario(discord.ui.View):
         except Exception as e:
             s.rollback()
             print(f"Erro ao atualizar id_mensagem do formulário rejeitado: {e}")
-            # tenta remover a mensagem enviada para evitar inconsistência
             try:
                 await new_msg.delete()
             except Exception:
@@ -465,11 +529,12 @@ class BotoesFormulario(discord.ui.View):
         finally:
             s.close()
 
-        # Tenta excluir a mensagem original
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
+        # Exclui a mensagem original
+        if source_message is not None:
+            try:
+                await source_message.delete()
+            except Exception:
+                pass
 
         await interaction.followup.send("**Formulário Rejeitado!**", ephemeral=True)
 class registrar_usuario(commands.Cog):
@@ -784,5 +849,11 @@ class registrar_usuario(commands.Cog):
 async def setup(bot: commands.Bot):
     cog = registrar_usuario(bot)
     await bot.add_cog(cog)
+    # Registra a View como persistente para que botões antigos continuem funcionando após reiniciar.
+    # Os custom_id precisam ser fixos (já são: aprovar_button / rejeitar_button) e o timeout deve ser None.
+    try:
+        bot.add_view(BotoesFormulario(bot, timeout=None))
+    except Exception as e:
+        print(f"[registrar_usuario] Falha ao registrar BotoesFormulario como view persistente: {e}")
     # Inicia a tarefa que registra a view persistente (opcional)
     bot.loop.create_task(cog.registrar_view())
