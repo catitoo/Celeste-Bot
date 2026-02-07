@@ -57,6 +57,14 @@ class BotoesFormulario(discord.ui.View):
         super().__init__(timeout=timeout)
         self.bot = bot
 
+    @staticmethod
+    def _motivo_deve_aparecer(motivo: str) -> bool:
+        txt = (motivo or "").strip()
+        if not txt:
+            return False
+        txt_fold = txt.casefold()
+        return txt_fold not in {"não informado", "nao informado"}
+
     @discord.ui.button(label="Aprovar", style=discord.ButtonStyle.success, custom_id="aprovar_button")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         admin_cargo_id = os.getenv("ADMINISTRADOR_CARGO_ID")
@@ -343,7 +351,7 @@ class BotoesFormulario(discord.ui.View):
                     if user_obj is not None:
                         membro_mention = getattr(user_obj, 'mention', f"<@{target_user_id}>")
                         embed_aprovado = discord.Embed(
-                            title="<:formulario_aprovado:1469811985364291634> Formulário Aprovado!",
+                            title="<:formulario_aprovado:1469811985364291634>  Formulário Aprovado!",
                             description=(
                                 f"Parabéns {membro_mention}, seu formulário para se tornar um membro da nossa comunidade foi **aprovado**! <a:gg_gif_1:1469820399159083161>\n\n"
                                 "Seja muito bem-vindo(a)! Agora você tem acesso aos canais exclusivos para membros.\n"
@@ -469,8 +477,18 @@ class BotoesFormulario(discord.ui.View):
         embed = source_message.embeds[0] if (source_message and source_message.embeds) else None
         content = source_message.content if (source_message and not embed) else None
 
-        motivo_block = motivo.replace("```", "` ` `")
-        motivo_block = f"```{motivo_block}```"
+        motivo_deve_aparecer = self._motivo_deve_aparecer(motivo)
+        motivo_block = None
+        if motivo_deve_aparecer:
+            motivo_sanitizado = motivo.replace("```", "` ` `")
+            motivo_block = f"```{motivo_sanitizado}```"
+
+        # No canal de rejeitados, o campo Motivo deve sempre aparecer.
+        motivo_canal_txt = (motivo or "").strip()
+        if not motivo_canal_txt or motivo_canal_txt.casefold() in {"não informado", "nao informado"}:
+            motivo_canal_txt = "Não Informado"
+        motivo_canal_txt = motivo_canal_txt.replace("```", "` ` `")
+        motivo_block_canal = f"```{motivo_canal_txt}```"
 
         # Busca o formulário original e valida
         session = SessionLocal()
@@ -592,7 +610,7 @@ class BotoesFormulario(discord.ui.View):
                     new_embed.add_field(name=f.name, value=f.value, inline=f.inline)
                 new_embed.add_field(name="\u200b", value="", inline=False)
                 new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
-                new_embed.add_field(name="**Motivo:**", value=motivo_block, inline=False)
+                new_embed.add_field(name="**Motivo:**", value=motivo_block_canal, inline=False)
                 if getattr(embed, "thumbnail", None) and getattr(embed.thumbnail, "url", None):
                     new_embed.set_thumbnail(url=embed.thumbnail.url)
                 if getattr(embed, "author", None) and getattr(embed.author, "name", None):
@@ -607,7 +625,7 @@ class BotoesFormulario(discord.ui.View):
                 new_embed = discord.Embed(colour=discord.Colour.from_str("#d40000"))
                 new_embed.add_field(name="\u200b", value="", inline=False)
                 new_embed.add_field(name=f"**Rejeitado Por:** `{reviewer_apelido}`", value="", inline=False)
-                new_embed.add_field(name="**Motivo:**", value=motivo_block, inline=False)
+                new_embed.add_field(name="**Motivo:**", value=motivo_block_canal, inline=False)
                 new_embed.set_image(url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png")
 
             new_msg = await rejected_channel.send(content=content, embed=new_embed)
@@ -651,6 +669,49 @@ class BotoesFormulario(discord.ui.View):
         finally:
             s.close()
 
+        # Envia DM ao usuário informando a rejeição (falha aqui não deve quebrar o fluxo)
+        dm_enviada = False
+        try:
+            user_id_int = int(original_data.get("id_usuario"))
+        except Exception:
+            user_id_int = None
+
+        if user_id_int is not None:
+            try:
+                try:
+                    user_obj = self.bot.get_user(user_id_int) or await self.bot.fetch_user(user_id_int)
+                except Exception:
+                    user_obj = None
+
+                if user_obj is not None:
+                    desc = (
+                        f"Olá {user_obj.mention}, infelizmente seu formulário para se tornar um membro da nossa comunidade foi **rejeitado**! <:f_key_2:1469811974736183503>\n\n"
+                    )
+                    if motivo_deve_aparecer:
+                        desc += f"**Motivo:**\n{motivo_block}\n"
+                    desc += (
+                        "Isso pode ter ocorrido por não atender aos critérios necessários ou por informações incompletas.\n\n"
+                        "Mas não desanime! Você pode revisar suas respostas, conferir o motivo da rejeição (caso informado) e **enviar um novo formulário** quando estiver pronto.\n\n"
+                        "Se tiver dúvidas sobre o motivo da rejeição, sinta-se à vontade para entrar em contato com a nossa equipe."
+                    )
+
+                    formulario_rejeitado_embed = discord.Embed(
+                        title="<:formulario_rejeitado:1469811981228834823>  Formulário Rejeitado!",
+                        description=desc,
+                        colour=discord.Colour.from_str("#d40000"),
+                    )
+                    try:
+                        formulario_rejeitado_embed.set_image(
+                            url="https://i.ibb.co/sJ38G3VN/formulario-rejeitado-imagem.png"
+                        )
+                    except Exception:
+                        pass
+
+                    await user_obj.send(embed=formulario_rejeitado_embed)
+                    dm_enviada = True
+            except Exception as e:
+                print(f"Erro ao enviar DM de rejeição: {e}")
+
         # Exclui a mensagem original
         if source_message is not None:
             try:
@@ -658,11 +719,71 @@ class BotoesFormulario(discord.ui.View):
             except Exception:
                 pass
 
-        await interaction.followup.send("**Formulário Rejeitado!**", ephemeral=True)
+        if dm_enviada:
+            await interaction.followup.send("<:membro_rejeitado:1469813189259694100> **Formulário Rejeitado!**\nUma mensagem foi enviada ao usuário informando a rejeição.", ephemeral=True)
+        else:
+            await interaction.followup.send("<:membro_rejeitado:1469813189259694100> **Formulário Rejeitado!**\nUma mensagem foi enviada ao usuário informando a rejeição.", ephemeral=True)
 class registrar_usuario(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         super().__init__()
+
+    @staticmethod
+    async def _cleanup_aprovado_se_visitante(
+        interaction: discord.Interaction,
+        session,
+        user_id_int: int,
+    ) -> bool:
+        """Se o usuário tiver registro aprovado, mas ainda estiver com cargo de visitante,
+        remove o registro aprovado para permitir um novo envio.
+
+        Retorna True quando removeu algo.
+        """
+        visitante_env = os.getenv("VISITANTE_CARGO_ID")
+        if not visitante_env:
+            return False
+        try:
+            visitante_cargo_id = int(visitante_env)
+        except ValueError:
+            return False
+        if not visitante_cargo_id:
+            return False
+
+        guild = interaction.guild
+        if guild is None:
+            return False
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if member is None:
+            try:
+                member = guild.get_member(user_id_int)
+            except Exception:
+                member = None
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id_int)
+            except Exception:
+                member = None
+        if member is None:
+            return False
+
+        tem_visitante = any(getattr(r, "id", None) == visitante_cargo_id for r in getattr(member, "roles", []))
+        if not tem_visitante:
+            return False
+
+        try:
+            deletados = (
+                session.query(FormulariosDesenvolvedorAprovados)
+                .filter_by(id_usuario=int(user_id_int))
+                .delete(synchronize_session=False)
+            )
+            if deletados:
+                session.commit()
+                return True
+        except Exception as e:
+            session.rollback()
+            print(f"[registrar_usuario] Erro ao limpar aprovado (visitante): {e}")
+        return False
 
     # Função para salvar valores no arquivo .env
     def salvar_no_env(self, chave, valor):
@@ -728,11 +849,13 @@ class registrar_usuario(commands.Cog):
             try:
                 ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
                 if ja_aprovado:
-                    await interaction.response.send_message(
-                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
-                        ephemeral=True,
-                    )
-                    return
+                    limpou = await registrar_usuario._cleanup_aprovado_se_visitante(interaction, session, user_id_int)
+                    if not limpou:
+                        await interaction.response.send_message(
+                            "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                            ephemeral=True,
+                        )
+                        return
 
                 # (novo) bloqueia se já existir formulário ativo/pendente para o usuário
                 if FormulariosAtivos is not None:
@@ -870,11 +993,13 @@ class registrar_usuario(commands.Cog):
             try:
                 ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
                 if ja_aprovado:
-                    await interaction.response.send_message(
-                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
-                        ephemeral=True,
-                    )
-                    return
+                    limpou = await registrar_usuario._cleanup_aprovado_se_visitante(interaction, session, user_id_int)
+                    if not limpou:
+                        await interaction.response.send_message(
+                            "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                            ephemeral=True,
+                        )
+                        return
 
                 if FormulariosAtivos is not None:
                     existente = session.query(FormulariosAtivos).filter_by(id_usuario=user_id).first()
@@ -955,11 +1080,13 @@ class registrar_usuario(commands.Cog):
             try:
                 ja_aprovado = session.query(FormulariosDesenvolvedorAprovados).filter_by(id_usuario=user_id_int).first()
                 if ja_aprovado:
-                    await interaction.response.send_message(
-                        "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
-                        ephemeral=True,
-                    )
-                    return
+                    limpou = await registrar_usuario._cleanup_aprovado_se_visitante(interaction, session, user_id_int)
+                    if not limpou:
+                        await interaction.response.send_message(
+                            "<:formulario_aprovado:1469811985364291634> Você já possui um formulário **aprovado** e não pode enviar um novo.",
+                            ephemeral=True,
+                        )
+                        return
 
                 if FormulariosAtivos is not None:
                     existente = session.query(FormulariosAtivos).filter_by(id_usuario=user_id).first()
