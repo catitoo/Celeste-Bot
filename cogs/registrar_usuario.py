@@ -3,6 +3,8 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv, set_key
 from datetime import datetime
+import asyncio  # Necessário para o timer
+import time     # Necessário para o rate limit
 from database.setup_database import SessionLocal, FormulariosDesenvolvedor, FormulariosDesenvolvedorAprovados, FormulariosDesenvolvedorRejeitados
 
 # (novo) tenta importar a tabela de formulários ativos; se não existir, usa fallback
@@ -13,6 +15,11 @@ except Exception:
 
 load_dotenv()
 
+# --- Função Auxiliar para agendar a atualização (Hook) ---
+def agendar_atualizacao_canal(bot: commands.Bot):
+    cog = bot.get_cog("registrar_usuario")
+    if cog:
+        cog.schedule_channel_rename()
 
 class MotivoRejeicaoModal(discord.ui.Modal):
     def __init__(
@@ -370,11 +377,14 @@ class BotoesFormulario(discord.ui.View):
                 except Exception:
                     pass
 
-                msg = "<:membro_aprovado:1469811980117344502> **Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade."
+        msg = "<:membro_aprovado:1469811980117344502> **Formulário Aprovado!**\nUma mensagem foi enviada ao usuario com informações iniciais da comunidade."
         if cargo_aviso:
             msg += f"\n\n**Aviso:** {cargo_aviso}"
 
         await interaction.followup.send(msg, ephemeral=True)
+        
+        # [HOOK] Atualiza o nome do canal (Removeu 1 da lista)
+        agendar_atualizacao_canal(self.bot)
 
     @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, custom_id="rejeitar_button")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -723,10 +733,88 @@ class BotoesFormulario(discord.ui.View):
             await interaction.followup.send("<:membro_rejeitado:1469813189259694100> **Formulário Rejeitado!**\nUma mensagem foi enviada ao usuário informando a rejeição.", ephemeral=True)
         else:
             await interaction.followup.send("<:membro_rejeitado:1469813189259694100> **Formulário Rejeitado!**\nUma mensagem foi enviada ao usuário informando a rejeição.", ephemeral=True)
+        
+        # [HOOK] Atualiza o nome do canal (Removeu 1 da lista)
+        agendar_atualizacao_canal(self.bot)
+
 class registrar_usuario(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         super().__init__()
+        # [NOVO] Variável para armazenar a tarefa de atualização (Debounce)
+        self.channel_rename_task = None
+        # [NOVO] Guarda o momento (timestamp) em que será permitido renomear novamente
+        self.next_allowed_rename_time = 0 
+
+    # [NOVO] Método para agendar a atualização com debounce e fila inteligente
+    def schedule_channel_rename(self):
+        # Se já existe uma tarefa agendada, cancela para reiniciar o timer
+        if self.channel_rename_task and not self.channel_rename_task.done():
+            self.channel_rename_task.cancel()
+        
+        # Cria uma nova tarefa no loop de eventos
+        self.channel_rename_task = self.bot.loop.create_task(self._perform_channel_rename())
+
+    # [NOVO] Lógica principal de atualização
+    async def _perform_channel_rename(self):
+        try:
+            # 1. Debounce Inicial: Espera 60 segundos para agrupar ações rápidas
+            await asyncio.sleep(60)
+
+            # 2. Verifica o Rate Limit de 10 minutos (600 segundos)
+            now = time.time()
+            if now < self.next_allowed_rename_time:
+                wait_time = self.next_allowed_rename_time - now
+                # Se ainda não passou o tempo seguro, dorme o restante
+                print(f"⏳ Rate Limit Discord: Aguardando mais {int(wait_time)}s para renomear o canal...")
+                await asyncio.sleep(wait_time)
+
+            # --- ATUALIZAÇÃO ---
+            channel_id_env = os.getenv("FORMULARIO_PENDENTE_DESENVOLVEDOR_CHANNEL_ID")
+            if not channel_id_env: return
+            try:
+                channel_id = int(channel_id_env)
+            except ValueError: return
+
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            if not channel: return
+
+            # Ler IDs do Banco de Dados
+            session = SessionLocal()
+            db_message_ids = set()
+            try:
+                # Pega todos os pendentes da tabela principal
+                forms = session.query(FormulariosDesenvolvedor.id_mensagem).filter_by(status="pendente").all()
+                db_message_ids = {str(f.id_mensagem) for f in forms if f.id_mensagem}
+            except Exception as e:
+                print(f"Erro ao ler banco: {e}")
+                return
+            finally:
+                session.close()
+
+            # Contar mensagens reais no canal
+            count = 0
+            async for message in channel.history(limit=None):
+                if str(message.id) in db_message_ids:
+                    count += 1
+            
+            new_name = f"📘・pendentes-{count}"
+            
+            # Só gasta a requisição da API se o nome realmente mudou
+            if channel.name != new_name:
+                await channel.edit(name=new_name)
+                # print(f"✅ Canal renomeado para: {new_name}")
+                
+                # Define que a próxima renomeação só pode ocorrer daqui a 10 min + 10 seg de folga
+                self.next_allowed_rename_time = time.time() + 610
+            else:
+                pass
+
+        except asyncio.CancelledError:
+            # Tarefa cancelada pois entrou nova ação; a nova tarefa assume.
+            pass
+        except Exception as e:
+            print(f"Erro crítico ao renomear canal: {e}")
 
     @staticmethod
     async def _cleanup_aprovado_se_visitante(
@@ -979,6 +1067,10 @@ class registrar_usuario(commands.Cog):
                 session.close()
 
             await interaction.response.send_message("**Formulário enviado com sucesso!**\nAgora aguarde até que um membro da nossa equipe analise seu formulario.", ephemeral=True)
+            
+            # [HOOK] Atualiza o nome do canal (Adicionou 1 na lista)
+            agendar_atualizacao_canal(self.bot)
+
     class Registrar_Usurario_View(discord.ui.View):
         def __init__(self, bot: commands.Bot, *, timeout: float = None):
             super().__init__(timeout=timeout)
