@@ -66,7 +66,8 @@ class CanalRegras(commands.Cog):
 
             # Atualiza o arquivo .env no diretório raiz do projeto
             try:
-                env_path = Path(__file__).resolve().parent.parent / '.env'
+                # subir 3 níveis para chegar à raiz do repositório
+                env_path = Path(__file__).resolve().parents[2] / '.env'
                 if env_path.exists():
                     content = env_path.read_text(encoding='utf-8')
                     if re.search(r'^REGRAS_CHANNEL_ID=.*$', content, flags=re.MULTILINE):
