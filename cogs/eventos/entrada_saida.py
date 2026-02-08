@@ -6,7 +6,7 @@ from dotenv import load_dotenv  # Importa dotenv para carregar o .env
 # Carrega as variáveis do .env
 load_dotenv()
 
-class eventos(commands.Cog):
+class LogEntradaSaida(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         super().__init__()
@@ -54,7 +54,7 @@ class eventos(commands.Cog):
             await canal.send(embed=membro_saiu)
 
 async def setup(bot):
-    await bot.add_cog(eventos(bot))
+    await bot.add_cog(LogEntradaSaida(bot))
 
 
 
