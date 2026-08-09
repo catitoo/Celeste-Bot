@@ -8,7 +8,6 @@ from discord.ext import commands
 from database.setup_database import (
     EMBED_CAMPOS,
     EMBED_LIMITE_POR_USUARIO,
-    embed_criar,
     embed_listar,
     embed_remover,
     embed_salvar,
@@ -19,8 +18,9 @@ COR_PADRAO = 16722217
 # Estado inicial de toda embed recém-criada
 EMBED_PADRAO = {
     **{campo: None for campo in EMBED_CAMPOS},
-    "titulo": "Título do Embed",
-    "descricao": "Descrição do Embed. Use os botões abaixo para montar a sua mensagem.",
+    "titulo": "Título",
+    "descricao": "Descrição",
+    "rodape": "Use os botões abaixo para montar a sua mensagem.",
     "cor": COR_PADRAO,
 }
 
@@ -86,7 +86,7 @@ class CriarEmbed(commands.Cog):
 
         await interaction.response.send_message(
             content=view.conteudo(),
-            embed=montar_embed(view.dados_atuais),
+            embed=view.previa(),
             view=view,
             ephemeral=True,
         )
@@ -101,7 +101,8 @@ def montar_embed(dados: dict) -> discord.Embed:
     embed = discord.Embed(
         title=titulo or None,
         description=descricao or None,
-        colour=discord.Colour(cor if cor is not None else COR_PADRAO),
+        # Sem cor a embed fica sem a barra lateral colorida
+        colour=discord.Colour(cor) if cor is not None else None,
     )
 
     if dados.get("imagem"):
@@ -127,11 +128,6 @@ def montar_embed(dados: dict) -> discord.Embed:
     return embed
 
 
-def embed_template() -> discord.Embed:
-    """Embed de exemplo exibida no painel antes de qualquer edição."""
-    return montar_embed(EMBED_PADRAO)
-
-
 def mesmo_conteudo(a: dict, b: dict) -> bool:
     """Compara apenas os campos que são persistidos."""
     return all(a.get(campo) == b.get(campo) for campo in EMBED_CAMPOS)
@@ -142,7 +138,7 @@ def texto_ou_nada(valor: str | None) -> str | None:
 
 
 def converter_cor(texto: str | None) -> int | None:
-    """Aceita cor em hex (#FF3629 / FF3629). Vazio mantém a cor padrão."""
+    """Aceita cor em hex (#FF3629 / FF3629). Vazio deixa a embed sem cor."""
     texto = (texto or "").strip()
     if not texto:
         return None
@@ -163,7 +159,7 @@ def validar_url(texto: str | None, campo: str) -> str | None:
 
 def titulo_modal(painel: "PainelEmbedView", prefixo: str) -> str:
     """Título de modal, cortado no limite de 45 caracteres do Discord."""
-    return f"{prefixo} — {painel.rotulo_do_slot(painel.slot_atual)}"[:45]
+    return f"{prefixo} - {painel.rotulo_do_slot(painel.slot_atual)}"[:45]
 
 
 class NovaEmbedModal(discord.ui.Modal, title="Nova Embed"):
@@ -171,7 +167,6 @@ class NovaEmbedModal(discord.ui.Modal, title="Nova Embed"):
 
     nome = discord.ui.TextInput(
         label="Nome da embed (opcional)",
-        placeholder="Aparece no menu do painel. Em branco: Embed N",
         required=False,
         max_length=80,
     )
@@ -179,21 +174,58 @@ class NovaEmbedModal(discord.ui.Modal, title="Nova Embed"):
     def __init__(self, painel: "PainelEmbedView"):
         super().__init__(timeout=600)
         self.painel = painel
+        # O slot livre é consultado só para compor o nome padrão exibido
+        slot = painel.proximo_slot_livre()
+        self.nome.placeholder = (
+            f"Nome padrão: Embed {slot}" if slot else "Aparece no menu do painel"
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
-        nova = embed_criar(
-            self.painel.id_usuario,
-            **{**EMBED_PADRAO, "nome": texto_ou_nada(self.nome.value)},
-        )
-        if nova is None:
+        slot = self.painel.proximo_slot_livre()
+        if slot is None:
             await interaction.response.send_message(
                 f"Você já atingiu o limite de {EMBED_LIMITE_POR_USUARIO} embeds.", ephemeral=True
             )
             return
 
-        self.painel.slot_atual = nova["slot"]
+        # A embed nasce como rascunho: só vai para o banco quando o usuário salvar
+        self.painel.rascunhos[slot] = {
+            **EMBED_PADRAO,
+            "nome": texto_ou_nada(self.nome.value),
+            "slot": slot,
+        }
+        self.painel.slot_atual = slot
         self.painel.recarregar()
         await self.painel.atualizar(interaction)
+
+
+class ExcluirEmbedModal(discord.ui.Modal):
+    """Exige a palavra de confirmação digitada antes de apagar a embed."""
+
+    PALAVRA = "CONFIRMAR"
+
+    def __init__(self, painel: "PainelEmbedView"):
+        super().__init__(title=titulo_modal(painel, "Excluir Embed"), timeout=600)
+        self.painel = painel
+        # O slot é fixado agora: o painel pode mudar de seleção enquanto o modal está aberto
+        self.slot = painel.slot_atual
+        self.confirmacao = discord.ui.TextInput(
+            label=f"Digite {self.PALAVRA} para excluir",
+            placeholder=self.PALAVRA,
+            required=True,
+            max_length=len(self.PALAVRA) + 5,
+        )
+        self.add_item(self.confirmacao)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.confirmacao.value.strip().upper() != self.PALAVRA:
+            await interaction.response.send_message(
+                f"Exclusão cancelada. é preciso digitar `{self.PALAVRA}` para confirmar.",
+                ephemeral=True,
+            )
+            return
+
+        await self.painel.excluir(interaction, self.slot)
 
 
 class CampoModal(discord.ui.Modal):
@@ -223,19 +255,19 @@ class CampoModal(discord.ui.Modal):
         self.painel.recarregar()
         await interaction.response.edit_message(
             content=self.painel.conteudo(),
-            embed=montar_embed(self.painel.dados_atuais),
+            embed=self.painel.previa(),
             view=self.painel,
         )
 
 
 class RenomearModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Renomear"))
+        super().__init__(painel, titulo_modal(painel, "Renomear Embed"))
 
     def montar_campos(self, dados):
         self.nome = discord.ui.TextInput(
             label="Nome da embed (opcional)",
-            placeholder="Aparece no menu do painel. Em branco: Embed N",
+            placeholder=f"Nome padrão: Embed {self.painel.slot_atual}",
             required=False,
             max_length=80,
             default=dados.get("nome") or "",
@@ -248,11 +280,12 @@ class RenomearModal(CampoModal):
 
 class TituloModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Título"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Título"))
 
     def montar_campos(self, dados):
         self.titulo = discord.ui.TextInput(
-            label="Título",
+            label="Novo Título",
+            placeholder="Deixe vazio para remover o título.",
             required=False,
             max_length=256,
             default=dados.get("titulo") or "",
@@ -265,11 +298,12 @@ class TituloModal(CampoModal):
 
 class DescricaoModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Descrição"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Descrição"))
 
     def montar_campos(self, dados):
         self.descricao = discord.ui.TextInput(
-            label="Descrição",
+            label="Nova Descrição",
+            placeholder="Deixe vazio para remover a descrição.",
             style=discord.TextStyle.paragraph,
             required=False,
             max_length=4000,
@@ -283,14 +317,16 @@ class DescricaoModal(CampoModal):
 
 class CorModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Cor"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Cor"))
 
     def montar_campos(self, dados):
         cor = dados.get("cor")
         self.cor = discord.ui.TextInput(
-            label="Cor (hexadecimal)",
-            placeholder="#FF3629",
+            label="Nova Cor (hexadecimal)",
+            placeholder="Deixe vazio para remover a cor.",
             required=False,
+            # O Discord bloqueia o envio fora dessa faixa: só passa vazio, FF3629 ou #FF3629
+            min_length=6,
             max_length=7,
             default=f"#{cor:06X}" if cor is not None else "",
         )
@@ -302,24 +338,25 @@ class CorModal(CampoModal):
 
 class AutorModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Autor"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Autor"))
 
     def montar_campos(self, dados):
         self.nome = discord.ui.TextInput(
-            label="Nome do autor",
+            label="Novo Nome do Autor",
+            placeholder="Deixe vazio para remover o autor.",
             required=False,
             max_length=256,
             default=dados.get("autor_nome") or "",
         )
         self.icone = discord.ui.TextInput(
-            label="URL do ícone",
-            placeholder="https://...",
+            label="Nova URL do Ícone",
+            placeholder="https://... — deixe vazio para remover o ícone.",
             required=False,
             default=dados.get("autor_icone") or "",
         )
         self.url = discord.ui.TextInput(
-            label="Link do nome",
-            placeholder="https://...",
+            label="Novo Link do Nome",
+            placeholder="https://... — deixe vazio para remover o link.",
             required=False,
             default=dados.get("autor_url") or "",
         )
@@ -335,18 +372,18 @@ class AutorModal(CampoModal):
 
 class ImagemModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Imagem e Thumbnail"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Imagem"))
 
     def montar_campos(self, dados):
         self.imagem = discord.ui.TextInput(
-            label="URL da imagem (rodapé da embed)",
-            placeholder="https://...",
+            label="Nova URL da Imagem (rodapé da embed)",
+            placeholder="https://... — deixe vazio para remover a imagem.",
             required=False,
             default=dados.get("imagem") or "",
         )
         self.thumbnail = discord.ui.TextInput(
-            label="URL do thumbnail (canto superior)",
-            placeholder="https://...",
+            label="Nova URL do Thumbnail (canto superior)",
+            placeholder="https://... — deixe vazio para remover o thumbnail.",
             required=False,
             default=dados.get("thumbnail") or "",
         )
@@ -361,18 +398,19 @@ class ImagemModal(CampoModal):
 
 class RodapeModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
-        super().__init__(painel, titulo_modal(painel, "Rodapé"))
+        super().__init__(painel, titulo_modal(painel, "Alterar Rodapé"))
 
     def montar_campos(self, dados):
         self.rodape = discord.ui.TextInput(
-            label="Texto do rodapé",
+            label="Novo Texto do Rodapé",
+            placeholder="Deixe vazio para remover o rodapé.",
             required=False,
             max_length=2048,
             default=dados.get("rodape") or "",
         )
         self.icone = discord.ui.TextInput(
-            label="URL do ícone (precisa de um texto)",
-            placeholder="https://...",
+            label="Nova URL do Ícone (precisa de um texto)",
+            placeholder="https://... — deixe vazio para remover o ícone.",
             required=False,
             default=dados.get("rodape_icone") or "",
         )
@@ -393,7 +431,8 @@ class PainelEmbedView(discord.ui.View):
         # Nenhuma embed vem selecionada: o painel abre no modo lista, exibindo o template
         self.slot_atual: int | None = None
         self.embeds: list[dict] = []
-        # Edições ainda não gravadas no banco, por slot
+        # Edições ainda não gravadas no banco, por slot. Uma embed recém-criada
+        # também vive aqui: ela só existe na conta do usuário depois do salvar.
         self.rascunhos: dict[int, dict] = {}
         self.recarregar()
 
@@ -403,21 +442,21 @@ class PainelEmbedView(discord.ui.View):
         """Relê as embeds do usuário no banco e sincroniza os componentes do painel."""
         self.embeds = embed_listar(self.id_usuario)
 
-        slots = [e["slot"] for e in self.embeds]
+        slots = sorted(self.slots_ocupados)
         if self.slot_atual not in slots:
             self.slot_atual = None
 
-        if self.embeds:
+        if slots:
             self.selecionar_embed.disabled = False
             self.selecionar_embed.placeholder = "Selecione um Embed para editar"
             self.selecionar_embed.options = [
                 discord.SelectOption(
-                    label=(self.rotulo_do_slot(e["slot"]) + (" • não salva" if e["slot"] in self.rascunhos else ""))[:100],
-                    value=str(e["slot"]),
-                    description=((self.dados_do_slot(e["slot"]).get("titulo") or "Sem título").strip() or "Sem título")[:100],
-                    default=e["slot"] == self.slot_atual,
+                    label=self.rotulo_do_slot(slot)[:100],
+                    value=str(slot),
+                    description=((self.dados_do_slot(slot).get("titulo") or "Sem título").strip() or "Sem título")[:100],
+                    default=slot == self.slot_atual,
                 )
-                for e in self.embeds
+                for slot in slots
             ]
         else:
             # O Discord exige ao menos uma opção mesmo em um menu desabilitado
@@ -427,15 +466,38 @@ class PainelEmbedView(discord.ui.View):
                 discord.SelectOption(label="Nenhuma embed criada", value="0")
             ]
 
-        self.adicionar_embed.disabled = len(self.embeds) >= EMBED_LIMITE_POR_USUARIO
+        self.adicionar_embed.disabled = len(slots) >= EMBED_LIMITE_POR_USUARIO
         self._sincronizar_componentes()
+
+    @property
+    def slots_salvos(self) -> set[int]:
+        return {e["slot"] for e in self.embeds}
+
+    @property
+    def slots_ocupados(self) -> set[int]:
+        """Slots já no banco somados aos que existem só como rascunho."""
+        return self.slots_salvos | set(self.rascunhos)
+
+    @property
+    def slots_novos(self) -> set[int]:
+        """Embeds criadas no painel que ainda não foram gravadas no banco."""
+        return set(self.rascunhos) - self.slots_salvos
+
+    def proximo_slot_livre(self) -> int | None:
+        """Primeiro slot disponível, ou None se o limite já foi atingido."""
+        ocupados = self.slots_ocupados
+        return next(
+            (n for n in range(1, EMBED_LIMITE_POR_USUARIO + 1) if n not in ocupados),
+            None,
+        )
 
     def _sincronizar_componentes(self):
         """Monta o painel conforme o modo: lista (sem seleção) ou edição."""
         self.clear_items()
-        self.add_item(self.selecionar_embed)
 
+        # O menu só existe no modo lista; na edição a volta é pelo botão ↩️
         if self.slot_atual is None:
+            self.add_item(self.selecionar_embed)
             self.add_item(self.adicionar_embed)
             return
 
@@ -477,6 +539,12 @@ class PainelEmbedView(discord.ui.View):
             return dict(EMBED_PADRAO)
         return self.dados_do_slot(self.slot_atual)
 
+    def previa(self) -> discord.Embed | None:
+        """A prévia só existe no modo edição: a lista não mostra embed nenhuma."""
+        if self.slot_atual is None:
+            return None
+        return montar_embed(self.dados_atuais)
+
     def aplicar_alteracoes(self, alteracoes: dict):
         """Mescla a edição de um campo ao estado atual da embed selecionada."""
         dados = dict(self.dados_atuais)
@@ -493,23 +561,38 @@ class PainelEmbedView(discord.ui.View):
         else:
             self.rascunhos[slot] = dados
 
-    def conteudo(self, aviso: str | None = None) -> str:
-        total = f"({len(self.embeds)}/{EMBED_LIMITE_POR_USUARIO})"
-        if not self.embeds:
+    def conteudo(self) -> str:
+        ocupados = self.slots_ocupados
+        total = f"({len(ocupados)}/{EMBED_LIMITE_POR_USUARIO})"
+        if not ocupados:
             linha = "**Painel de Criação de Embed**"
         elif self.slot_atual is None:
-            linha = f"Painel de Criação de Embed — selecione uma embed no menu para editar {total}"
+            linha = f"**Painel de Criação e Seleção de Embed** - {total}"
         else:
-            linha = f"Painel de Criação de Embed — editando **{self.rotulo_do_slot(self.slot_atual)}** {total}"
-            if self.tem_alteracoes:
-                linha += "\n⚠️ Alterações não salvas — clique em **Salvar Alterações** para gravá-las."
-        # Linha em branco separando o aviso do estado do painel
-        return f"{aviso}\n\n{linha}" if aviso else linha
+            partes = [f'**Painel de Edição de Embed** - Editando "{self.rotulo_do_slot(self.slot_atual)}"']
+            if self.slot_atual in self.slots_novos:
+                partes.append("⚠️ Esta embed ainda não esta salva na sua conta ⚠️")
+            elif self.tem_alteracoes:
+                partes.append("⚠️ Alterações não salvas — clique em **Salvar Alterações** para gravá-las.")
+            linha = "\n\n".join(partes)
+        # O Discord corta espaços no fim da mensagem: o caractere invisível
+        # segura a linha em branco entre o texto e a embed
+        return linha + "\n​"
 
-    async def atualizar(self, interaction: discord.Interaction, aviso: str | None = None):
+    async def excluir(self, interaction: discord.Interaction, slot: int):
+        """Apaga a embed do slot e volta para a lista."""
+        # Uma embed que nunca foi salva não tem nada a apagar no banco
+        if slot not in self.slots_novos:
+            embed_remover(self.id_usuario, slot)
+        self.rascunhos.pop(slot, None)
+        self.slot_atual = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def atualizar(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content=self.conteudo(aviso=aviso),
-            embed=montar_embed(self.dados_atuais),
+            content=self.conteudo(),
+            embed=self.previa(),
             view=self,
         )
 
@@ -519,7 +602,10 @@ class PainelEmbedView(discord.ui.View):
         if self.interacao_origem:
             try:
                 await self.interacao_origem.edit_original_response(
-                    content="Painel expirado. Use `/criar-embed` novamente — suas embeds continuam salvas.",
+                    content=(
+                        "**Painel expirado.**\n"
+                        "Use `/criar-embed` novamente. As alterações que foram salvas ainda continuam na sua conta."
+                    ),
                     view=self,
                 )
             except Exception:
@@ -539,7 +625,7 @@ class PainelEmbedView(discord.ui.View):
         self.recarregar()
         await self.atualizar(interaction)
 
-    @discord.ui.button(label="Adicionar Embed", emoji="➕", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Adicionar Embed", emoji="➕", style=discord.ButtonStyle.success, row=1)
     async def adicionar_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NovaEmbedModal(self))
 
@@ -597,27 +683,28 @@ class PainelEmbedView(discord.ui.View):
 
     @discord.ui.button(label="Salvar Alterações", emoji="💾", style=discord.ButtonStyle.success, row=4)
     async def salvar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        rascunho = self.rascunhos.pop(self.slot_atual, None)
+        slot = self.slot_atual
+        rascunho = self.rascunhos.get(slot)
         if rascunho is None:
             await interaction.response.send_message("Não há alterações pendentes.", ephemeral=True)
             return
 
-        slot = self.slot_atual
+        # O limite é conferido de novo aqui: o painel pode estar aberto há tempo
+        if slot not in self.slots_salvos and len(self.embeds) >= EMBED_LIMITE_POR_USUARIO:
+            await interaction.response.send_message(
+                f"Você já atingiu o limite de {EMBED_LIMITE_POR_USUARIO} embeds.", ephemeral=True
+            )
+            return
+
+        self.rascunhos.pop(slot, None)
         embed_salvar(self.id_usuario, slot, **{campo: rascunho.get(campo) for campo in EMBED_CAMPOS})
 
         self.recarregar()
-        # Lido depois do recarregar para que um rename recém-salvo apareça já com o nome novo
-        await self.atualizar(interaction, aviso=f"✅ **{self.rotulo_do_slot(slot)}** salva.")
+        await self.atualizar(interaction)
 
     @discord.ui.button(label="Excluir Embed", emoji="🗑️", style=discord.ButtonStyle.danger, row=4)
     async def excluir_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        slot = self.slot_atual
-        rotulo = self.rotulo_do_slot(slot)
-        embed_remover(self.id_usuario, slot)
-        self.rascunhos.pop(slot, None)
-        self.slot_atual = None
-        self.recarregar()
-        await self.atualizar(interaction, aviso=f"🗑️ **{rotulo}** excluída da sua conta.")
+        await interaction.response.send_modal(ExcluirEmbedModal(self))
 
     @discord.ui.button(label="Adicionar Botão", emoji="🔗", style=discord.ButtonStyle.secondary, row=4)
     async def adicionar_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
