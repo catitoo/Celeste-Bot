@@ -21,13 +21,32 @@ async def carregar_cogs():
                 path = os.path.relpath(os.path.join(root, file), '.').replace(os.sep, '.')
                 await bot.load_extension(path[:-3])
 
+# Roda uma única vez, antes da conexão com o gateway (ao contrário do on_ready,
+# que dispara de novo a cada reconexão)
+async def setup_hook():
+    try:
+        await carregar_cogs()  # Carrega os cogs
+        await bot.tree.sync()  # Sincroniza comandos de barra
+        print("Todos os comandos foram sincronizados com sucesso!")
+    except Exception as e:
+        print(f"Erro ao carregar cogs / sincronizar comandos: {e}")
+
+bot.setup_hook = setup_hook
+
+# Garante que as limpezas de inicialização não se repitam nas reconexões
+_limpezas_iniciais_feitas = False
+
 # bot iniciou
 @bot.event
 async def on_ready():
     print(f'{bot.user} funcionando!')
 
+    global _limpezas_iniciais_feitas
+    if _limpezas_iniciais_feitas:
+        return
+    _limpezas_iniciais_feitas = True
+
     try:
-        await carregar_cogs()  # Carrega os cogs
         # Limpa canais VoIP salvos que já estejam vazios no momento do startup
         async def _limpar_voips_vazios():
             ativos = voip_list_ativos()
@@ -114,10 +133,8 @@ async def on_ready():
                 session.close()
 
         await _limpar_formularios_deletados()
-        await bot.tree.sync()  # Sincroniza comandos de barra
-        print("Todos os comandos foram sincronizados com sucesso!")
 
     except Exception as e:
-        print(f"Erro ao sincronizar comandos: {e}")
+        print(f"Erro nas limpezas de inicialização: {e}")
 
 bot.run(TOKEN)

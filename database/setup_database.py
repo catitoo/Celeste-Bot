@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint, text as sql_text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from datetime import datetime, timedelta
 import logging
@@ -69,6 +69,32 @@ class VoipPreferencias(Base):
 
     __table_args__ = (
         UniqueConstraint("id_servidor", "id_usuario", name="uq_voip_prefs_servidor_usuario"),
+    )
+
+class EmbedPersonalizado(Base):
+    """Embeds em construção, isoladas por usuário e compartilhadas entre os servidores."""
+    __tablename__ = "embeds_personalizados"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    slot = Column(Integer, nullable=False)  # numeração exibida no painel: "Embed 1", "Embed 2"...
+    nome = Column(Text, nullable=True)  # apelido opcional mostrado no menu do painel
+
+    titulo = Column(Text, nullable=True)
+    descricao = Column(Text, nullable=True)
+    cor = Column(Integer, nullable=True)
+    imagem = Column(Text, nullable=True)
+    thumbnail = Column(Text, nullable=True)
+    autor_nome = Column(Text, nullable=True)
+    autor_icone = Column(Text, nullable=True)
+    autor_url = Column(Text, nullable=True)
+    rodape = Column(Text, nullable=True)
+    rodape_icone = Column(Text, nullable=True)
+
+    atualizado_em = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("id_usuario", "slot", name="uq_embed_usuario_slot"),
     )
 
 class FormulariosDesenvolvedor(Base):
@@ -219,6 +245,148 @@ def registrar_punicao(guild_id: int, user_id: int, motivo: str, autor_id: int | 
             return getattr(p, "id", None)
     finally:
         session.close()
+
+# Campos editáveis de uma embed e teto de embeds que cada usuário pode manter.
+# O limite é 25 porque é o máximo de opções que um select menu do Discord aceita.
+EMBED_CAMPOS = (
+    "nome",
+    "titulo",
+    "descricao",
+    "cor",
+    "imagem",
+    "thumbnail",
+    "autor_nome",
+    "autor_icone",
+    "autor_url",
+    "rodape",
+    "rodape_icone",
+)
+EMBED_LIMITE_POR_USUARIO = 25
+
+_tabela_embeds_pronta = False
+
+
+def _garantir_tabela_embeds():
+    """Cria a tabela de embeds sob demanda (o projeto não roda create_all no boot)."""
+    global _tabela_embeds_pronta
+    if _tabela_embeds_pronta:
+        return
+
+    EmbedPersonalizado.__table__.create(bind=engine, checkfirst=True)
+
+    # Acrescenta colunas que não existiam em versões anteriores da tabela
+    with engine.begin() as conn:
+        existentes = {
+            linha[1] for linha in conn.execute(sql_text("PRAGMA table_info(embeds_personalizados)"))
+        }
+        for coluna in EmbedPersonalizado.__table__.columns:
+            if coluna.name not in existentes:
+                tipo = coluna.type.compile(engine.dialect)
+                conn.execute(sql_text(
+                    f'ALTER TABLE embeds_personalizados ADD COLUMN "{coluna.name}" {tipo}'
+                ))
+                logger.info("Coluna '%s' adicionada em embeds_personalizados.", coluna.name)
+
+    _tabela_embeds_pronta = True
+
+
+def _embed_para_dict(row: EmbedPersonalizado) -> dict:
+    dados = {campo: getattr(row, campo) for campo in EMBED_CAMPOS}
+    dados["slot"] = int(row.slot)
+    dados["cor"] = int(row.cor) if row.cor is not None else None
+    return dados
+
+
+def embed_listar(id_usuario: int) -> list[dict]:
+    """Retorna as embeds do usuário (válidas em qualquer servidor), ordenadas pelo slot."""
+    _garantir_tabela_embeds()
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(EmbedPersonalizado)
+            .filter_by(id_usuario=int(id_usuario))
+            .order_by(EmbedPersonalizado.slot)
+            .all()
+        )
+        return [_embed_para_dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+def embed_obter(id_usuario: int, slot: int) -> dict | None:
+    _garantir_tabela_embeds()
+    session = SessionLocal()
+    try:
+        row = session.query(EmbedPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        ).first()
+        return _embed_para_dict(row) if row else None
+    finally:
+        session.close()
+
+
+def embed_salvar(id_usuario: int, slot: int, **campos) -> dict:
+    """Cria ou atualiza a embed do slot informado e devolve o estado salvo."""
+    _garantir_tabela_embeds()
+    session = SessionLocal()
+    try:
+        row = session.query(EmbedPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        ).first()
+
+        if not row:
+            row = EmbedPersonalizado(
+                id_usuario=int(id_usuario),
+                slot=int(slot),
+            )
+            session.add(row)
+
+        for k, v in campos.items():
+            if k in EMBED_CAMPOS:
+                setattr(row, k, v)
+
+        session.commit()
+        return _embed_para_dict(row)
+    finally:
+        session.close()
+
+
+def embed_remover(id_usuario: int, slot: int) -> bool:
+    """Apaga a embed do slot informado. Retorna True se havia algo para apagar."""
+    _garantir_tabela_embeds()
+    session = SessionLocal()
+    try:
+        removidas = session.query(EmbedPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        ).delete()
+        session.commit()
+        return bool(removidas)
+    finally:
+        session.close()
+
+
+def embed_criar(id_usuario: int, **campos) -> dict | None:
+    """Cria uma embed no próximo slot livre. Retorna None se o limite foi atingido."""
+    _garantir_tabela_embeds()
+    session = SessionLocal()
+    try:
+        usados = {
+            int(r.slot) for r in session.query(EmbedPersonalizado.slot).filter_by(
+                id_usuario=int(id_usuario),
+            ).all()
+        }
+    finally:
+        session.close()
+
+    if len(usados) >= EMBED_LIMITE_POR_USUARIO:
+        return None
+
+    slot = next(n for n in range(1, EMBED_LIMITE_POR_USUARIO + 1) if n not in usados)
+    return embed_salvar(id_usuario, slot, **campos)
+
 
 def criar_tabelas():
     """Cria as tabelas definidas pelos models no banco de dados."""
