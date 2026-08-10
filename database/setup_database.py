@@ -101,6 +101,26 @@ class EmbedPersonalizado(Base):
         UniqueConstraint("id_usuario", "slot", "parte", name="uq_embed_usuario_slot_parte"),
     )
 
+class BotaoPersonalizado(Base):
+    """Botões de link da mensagem. Ficam fora da tabela de embeds porque pertencem
+    à mensagem inteira do slot, e não a uma das embeds empilhadas nela."""
+    __tablename__ = "botoes_personalizados"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    slot = Column(Integer, nullable=False)  # o mesmo slot da embed no painel
+    posicao = Column(Integer, nullable=False, default=1)  # ordem na mensagem (1..25)
+
+    rotulo = Column(Text, nullable=False)
+    url = Column(Text, nullable=False)
+    emoji = Column(Text, nullable=True)
+
+    atualizado_em = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("id_usuario", "slot", "posicao", name="uq_botao_usuario_slot_posicao"),
+    )
+
 class CorPersonalizada(Base):
     """Paleta de cores do usuário, reaproveitada em qualquer embed e servidor."""
     __tablename__ = "cores_personalizadas"
@@ -467,6 +487,104 @@ def embed_criar(id_usuario: int, **campos) -> dict | None:
 
     slot = next(n for n in range(1, EMBED_LIMITE_POR_USUARIO + 1) if n not in usados)
     return embed_salvar(id_usuario, slot, 1, **campos)
+
+
+# Campos editáveis de um botão de link e teto por mensagem: o Discord aceita
+# 5 linhas de componentes com 5 botões cada.
+BOTAO_CAMPOS = (
+    "rotulo",
+    "url",
+    "emoji",
+)
+BOTAO_LIMITE_POR_SLOT = 25
+
+_tabela_botoes_pronta = False
+
+
+def _garantir_tabela_botoes():
+    global _tabela_botoes_pronta
+    if _tabela_botoes_pronta:
+        return
+    BotaoPersonalizado.__table__.create(bind=engine, checkfirst=True)
+    _tabela_botoes_pronta = True
+
+
+def botao_listar(id_usuario: int) -> list[dict]:
+    """Botões do usuário, ordenados por slot e pela posição na mensagem."""
+    _garantir_tabela_botoes()
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(BotaoPersonalizado)
+            .filter_by(id_usuario=int(id_usuario))
+            .order_by(BotaoPersonalizado.slot, BotaoPersonalizado.posicao)
+            .all()
+        )
+        return [
+            {
+                "slot": int(r.slot),
+                "posicao": int(r.posicao),
+                **{campo: getattr(r, campo) for campo in BOTAO_CAMPOS},
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+def botao_salvar_slot(id_usuario: int, slot: int, botoes: list[dict]) -> list[dict]:
+    """Grava os botões do slot: cada item da lista vira uma posição (1..N) e as
+    posições que sobraram de uma versão anterior maior são apagadas."""
+    _garantir_tabela_botoes()
+    session = SessionLocal()
+    try:
+        existentes = {
+            int(r.posicao): r
+            for r in session.query(BotaoPersonalizado).filter_by(
+                id_usuario=int(id_usuario),
+                slot=int(slot),
+            ).all()
+        }
+
+        for posicao, dados in enumerate(botoes, start=1):
+            row = existentes.get(posicao)
+            if not row:
+                row = BotaoPersonalizado(
+                    id_usuario=int(id_usuario),
+                    slot=int(slot),
+                    posicao=posicao,
+                )
+                session.add(row)
+            for campo in BOTAO_CAMPOS:
+                setattr(row, campo, dados.get(campo))
+
+        for posicao, row in existentes.items():
+            if posicao > len(botoes):
+                session.delete(row)
+
+        session.commit()
+    finally:
+        session.close()
+
+    return [b for b in botao_listar(id_usuario) if b["slot"] == int(slot)]
+
+
+def botao_remover(id_usuario: int, slot: int, posicao: int | None = None) -> bool:
+    """Apaga os botões do slot, ou só o de uma posição. True se havia o que apagar."""
+    _garantir_tabela_botoes()
+    session = SessionLocal()
+    try:
+        consulta = session.query(BotaoPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        )
+        if posicao is not None:
+            consulta = consulta.filter(BotaoPersonalizado.posicao == int(posicao))
+        removidos = consulta.delete()
+        session.commit()
+        return bool(removidos)
+    finally:
+        session.close()
 
 
 # A opção "Sem cor" ocupa um lugar no menu, que aceita 25 no total.

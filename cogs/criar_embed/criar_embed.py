@@ -6,10 +6,15 @@ from discord import app_commands
 from discord.ext import commands
 
 from database.setup_database import (
+    BOTAO_CAMPOS,
+    BOTAO_LIMITE_POR_SLOT,
     COR_LIMITE_POR_USUARIO,
     EMBED_CAMPOS,
     EMBED_LIMITE_POR_USUARIO,
     EMBED_PARTES_POR_SLOT,
+    botao_listar,
+    botao_remover,
+    botao_salvar_slot,
     cor_listar,
     cor_remover,
     cor_salvar,
@@ -32,6 +37,7 @@ EMBED_PADRAO = {
 PADRAO_COR_HEX = re.compile(r"^#?([0-9a-fA-F]{6})$")
 PADRAO_URL = re.compile(r"^https?://\S+$", re.IGNORECASE)
 PADRAO_ESQUEMA = re.compile(r"^https?://", re.IGNORECASE)
+PADRAO_EMOJI_CUSTOM = re.compile(r"^<a?:\w{2,32}:\d{15,25}>$")
 
 # Emojis da aplicação por nome, lidos no carregamento da cog. O ID muda a cada
 # reupload e some quando o emoji é apagado, então o nome é a única referência
@@ -45,6 +51,27 @@ EMOJIS_NUMEROS: list[str | None] = [None] * EMBED_LIMITE_POR_USUARIO
 # Valor da opção fixa do menu de cores, que não pode ser removida
 SEM_COR = "__sem_cor__"
 EMOJI_VOLTAR = "<:voltar_embed:1536200612226793482>"
+
+# Ações que moram no seletor de partes junto das embeds da mensagem
+PARTE_ADICIONAR = "__adicionar_parte__"
+PARTE_REMOVER = "__remover_parte__"
+
+# Submodos do painel de edição. Cada um troca as linhas de componentes por um
+# conjunto próprio, porque a mensagem só aceita 5 linhas no total.
+MODO_CORES = "cores"
+MODO_BOTOES = "botoes"
+MODO_JSON = "json"
+MODO_ENVIAR = "enviar"
+
+CABECALHO_POR_MODO = {
+    MODO_CORES: "Painel de Cores",
+    MODO_BOTOES: "Remover Botão",
+    MODO_JSON: "Importar e Exportar JSON",
+    MODO_ENVIAR: "Enviar Mensagem",
+}
+
+# A prévia dos botões de link ocupa uma linha só, e uma linha comporta 5 botões
+BOTAO_POR_LINHA = 5
 
 
 async def carregar_emojis(bot: commands.Bot) -> None:
@@ -196,6 +223,22 @@ def validar_url(texto: str | None, campo: str) -> str | None:
     if not PADRAO_URL.match(texto):
         raise ValueError(f"{campo} inválida. Verifique o endereço digitado.")
     return texto
+
+
+def validar_emoji(texto: str | None) -> str | None:
+    """Aceita emoji do teclado ou emoji de servidor no formato `<:nome:id>`. O que
+    não parece emoji é recusado aqui para não derrubar a mensagem no envio."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    if PADRAO_EMOJI_CUSTOM.match(texto):
+        return texto
+    # Emoji unicode: curto e com ao menos um caractere fora da tabela ASCII
+    if len(texto) <= 16 and any(ord(c) > 127 for c in texto):
+        return texto
+    raise ValueError(
+        "Emoji inválido. Use um emoji do teclado ou o formato `<:nome:id>` de um emoji de servidor."
+    )
 
 
 def titulo_modal(painel: "PainelEmbedView", prefixo: str) -> str:
@@ -424,6 +467,69 @@ class NovaCorModal(discord.ui.Modal, title="Nova Cor"):
         await self.painel.atualizar(interaction)
 
 
+class BotaoLinkModal(discord.ui.Modal, title="Crie seu Botão de Link"):
+    """Acrescenta um botão de link à mensagem. Como o resto do painel, o botão
+    fica em rascunho e só vai para a conta do usuário no salvar."""
+
+    rotulo = discord.ui.TextInput(
+        label="Texto do botão",
+        placeholder="Clique aqui para visitar meu site",
+        required=True,
+        max_length=80,
+    )
+    url = discord.ui.TextInput(
+        label="URL do botão",
+        placeholder="https://discord.gg/vfCMEWfSQ6",
+        required=True,
+        max_length=512,
+    )
+    emoji = discord.ui.TextInput(
+        label="Emoji do botão (opcional)",
+        placeholder="😎",
+        required=False,
+        max_length=32,
+    )
+
+    def __init__(self, painel: "PainelEmbedView"):
+        super().__init__(timeout=600)
+        self.painel = painel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            url = validar_url(self.url.value, "URL do botão")
+            emoji = validar_emoji(self.emoji.value)
+        except ValueError as erro:
+            await interaction.response.send_message(str(erro), ephemeral=True)
+            return
+
+        rotulo = texto_ou_nada(self.rotulo.value)
+        if rotulo is None or url is None:
+            await interaction.response.send_message(
+                "O botão precisa de um texto e de uma URL.", ephemeral=True
+            )
+            return
+
+        # O slot pode ter mudado enquanto o modal estava aberto
+        slot = self.painel.slot_atual
+        if slot is None:
+            await interaction.response.send_message(
+                "Selecione uma embed antes de adicionar o botão.", ephemeral=True
+            )
+            return
+
+        botoes = [dict(b) for b in self.painel.botoes_do_slot(slot)]
+        if len(botoes) >= BOTAO_LIMITE_POR_SLOT:
+            await interaction.response.send_message(
+                f"Uma mensagem aceita no máximo {BOTAO_LIMITE_POR_SLOT} botões.", ephemeral=True
+            )
+            return
+
+        botoes.append({"rotulo": rotulo, "url": url, "emoji": emoji})
+        self.painel.registrar_rascunho_botoes(slot, botoes)
+        self.painel.recarregar()
+        await self.painel.atualizar(interaction)
+
+
 class AutorModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
         super().__init__(painel, titulo_modal(painel, "Alterar Autor"))
@@ -526,12 +632,16 @@ class PainelEmbedView(discord.ui.View):
         # Uma embed recém-criada também vive aqui: ela só existe na conta do
         # usuário depois do salvar.
         self.rascunhos: dict[int, list[dict]] = {}
-        # Terceiro modo do painel, aberto pelo botão Cor dentro da edição
-        self.modo_cores: bool = False
+        # Botões de link da mensagem, com o mesmo esquema de rascunho por slot.
+        # Ficam separados das embeds porque pertencem à mensagem, não a uma embed.
+        self.botoes: list[dict] = []
+        self.rascunhos_botoes: dict[int, list[dict]] = {}
+        # Submodo aberto por Cor, Remover Botão, JSON ou Enviar; None é a edição
+        self.modo: str | None = None
         self.cores: list[dict] = []
-        # Criado na mão, e não por decorator: o discord.ui só aceita 5 de largura
-        # por linha e o menu de slots já ocupa a linha 0 inteira na declaração.
-        self.selecionar_parte = discord.ui.Select(placeholder="Selecione a embed da mensagem", row=0)
+        # Criado na mão, e não por decorator: a linha 0 do painel de edição é da
+        # prévia dos botões de link, montada a cada render.
+        self.selecionar_parte = discord.ui.Select(placeholder="Selecione a embed da mensagem", row=1)
         self.selecionar_parte.callback = self._trocar_parte
         # Componentes do modo cores, também na mão: os declarados já lotam a view
         self.selecionar_cor = discord.ui.Select(placeholder="Selecione uma cor", row=0)
@@ -548,6 +658,18 @@ class PainelEmbedView(discord.ui.View):
         # Botão de link não tem callback: o Discord só abre a URL
         self.encontrar_cores = discord.ui.Button(
             label="Encontrar Cores", url="https://htmlcolorcodes.com", row=1)
+        # Componentes do modo de remoção de botões, pelo mesmo motivo
+        self.selecionar_botao = discord.ui.Select(
+            placeholder="Selecione o botão que quer remover", row=0)
+        self.selecionar_botao.callback = self._remover_botao_escolhido
+        self.voltar_botoes = discord.ui.Button(
+            emoji=EMOJI_VOLTAR, style=discord.ButtonStyle.secondary, row=1)
+        self.voltar_botoes.callback = self._sair_dos_botoes
+        # Volta dos submodos que reaproveitam os botões já declarados (JSON e Enviar).
+        # Fica na mesma linha deles para os três saírem lado a lado.
+        self.voltar_acoes = discord.ui.Button(
+            emoji=EMOJI_VOLTAR, style=discord.ButtonStyle.secondary, row=1)
+        self.voltar_acoes.callback = self._sair_do_submodo
         self._sanear_emojis()
         self.recarregar()
 
@@ -561,7 +683,7 @@ class PainelEmbedView(discord.ui.View):
         await self.atualizar(interaction)
 
     async def _sair_das_cores(self, interaction: discord.Interaction):
-        self.modo_cores = False
+        self.modo = None
         self.recarregar()
         await self.atualizar(interaction)
 
@@ -594,13 +716,56 @@ class PainelEmbedView(discord.ui.View):
             return None
         return next((c["nome"] for c in self.cores if c["cor"] == cor), None)
 
+    # --------------------------------------------------------------- botões
+
+    async def _remover_botao_escolhido(self, interaction: discord.Interaction):
+        """A escolha no menu já remove: não há um segundo clique para confirmar."""
+        botoes = [dict(b) for b in self.botoes_do_slot(self.slot_atual)]
+        indice = int(self.selecionar_botao.values[0])
+        if 0 <= indice < len(botoes):
+            botoes.pop(indice)
+        self.registrar_rascunho_botoes(self.slot_atual, botoes)
+        # Sem botões não sobra o que escolher: o painel volta para a edição
+        if not botoes:
+            self.modo = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _sair_dos_botoes(self, interaction: discord.Interaction):
+        self.modo = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _sair_do_submodo(self, interaction: discord.Interaction):
+        self.modo = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    def _montar_botoes_de_link(self) -> list[discord.ui.Button]:
+        """Os botões de link como eles vão sair na mensagem final. Só cabe uma
+        linha no painel, então o excedente aparece apenas na lista do texto."""
+        itens = []
+        for dados in self.botoes_do_slot(self.slot_atual)[:BOTAO_POR_LINHA]:
+            try:
+                itens.append(discord.ui.Button(
+                    label=(dados["rotulo"] or "")[:80],
+                    url=dados["url"],
+                    emoji=dados.get("emoji") or None,
+                    row=0,
+                ))
+            except Exception:
+                # Botão gravado com dado que o Discord recusa: some da prévia em
+                # vez de derrubar o painel inteiro na hora de renderizar
+                continue
+        return itens
+
     def _sanear_emojis(self):
         """Reaponta os emojis dos botões para os IDs atuais da aplicação, usando o
         nome como chave. Um emoji apagado sai do botão em vez de derrubar o painel
         inteiro com 'Invalid emoji' na hora de renderizar."""
         if not EMOJIS_APP:
             return
-        for item in [*self.children, self.voltar_cores]:
+        for item in [*self.children, self.voltar_cores, self.voltar_botoes, self.voltar_acoes]:
             emoji = getattr(item, "emoji", None)
             # Emoji unicode (sem id) não depende da aplicação
             if emoji is None or emoji.id is None:
@@ -608,7 +773,49 @@ class PainelEmbedView(discord.ui.View):
             item.emoji = EMOJIS_APP.get(emoji.name)
 
     async def _trocar_parte(self, interaction: discord.Interaction):
-        self.parte_atual = int(self.selecionar_parte.values[0])
+        """O menu troca de embed e também empilha ou tira uma: as duas ações
+        moram aqui porque não sobra espaço para botões próprios no painel."""
+        escolha = self.selecionar_parte.values[0]
+        if escolha == PARTE_ADICIONAR:
+            await self._adicionar_parte(interaction)
+            return
+        if escolha == PARTE_REMOVER:
+            await self._remover_parte(interaction)
+            return
+
+        self.parte_atual = int(escolha)
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _adicionar_parte(self, interaction: discord.Interaction):
+        """Empilha mais uma embed na mesma mensagem (o Discord aceita até 10)."""
+        partes = [dict(p) for p in self.partes_do_slot(self.slot_atual)]
+        if len(partes) >= EMBED_PARTES_POR_SLOT:
+            await interaction.response.send_message(
+                f"Uma mensagem aceita no máximo {EMBED_PARTES_POR_SLOT} embeds.", ephemeral=True
+            )
+            return
+
+        # A nova parte herda só o nome: ele identifica o slot, não a embed
+        partes.append({**EMBED_PADRAO, "nome": partes[0].get("nome")})
+        self.registrar_rascunho(self.slot_atual, partes)
+        self.parte_atual = len(partes)
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _remover_parte(self, interaction: discord.Interaction):
+        """Tira a embed selecionada da mensagem. Para apagar o slot inteiro é o Excluir Embed."""
+        partes = [dict(p) for p in self.partes_do_slot(self.slot_atual)]
+        if len(partes) <= 1:
+            await interaction.response.send_message(
+                "A mensagem precisa de pelo menos uma embed. Use **Excluir Embed** para apagar tudo.",
+                ephemeral=True,
+            )
+            return
+
+        partes.pop(self.parte_atual - 1)
+        self.registrar_rascunho(self.slot_atual, partes)
+        self.parte_atual = min(self.parte_atual, len(partes))
         self.recarregar()
         await self.atualizar(interaction)
 
@@ -617,6 +824,7 @@ class PainelEmbedView(discord.ui.View):
     def recarregar(self):
         """Relê as embeds do usuário no banco e sincroniza os componentes do painel."""
         self.embeds = embed_listar(self.id_usuario)
+        self.botoes = botao_listar(self.id_usuario)
         self.cores = cor_listar(self.id_usuario)
 
         slots = sorted(self.slots_ocupados)
@@ -648,24 +856,69 @@ class PainelEmbedView(discord.ui.View):
         self.adicionar_embed.disabled = len(slots) >= EMBED_LIMITE_POR_USUARIO
 
         if self.slot_atual is not None:
-            partes = self.partes_do_slot(self.slot_atual)
-            self.parte_atual = min(max(self.parte_atual, 1), len(partes))
-            self.selecionar_parte.placeholder = f"Editando a embed {self.parte_atual} de {len(partes)}"
-            self.selecionar_parte.options = [
-                discord.SelectOption(
-                    label=f"Embed {numero}",
-                    value=str(numero),
-                    description=self._resumo(dados),
-                    emoji=EMOJIS_NUMEROS[numero - 1],
-                    default=numero == self.parte_atual,
-                )
-                for numero, dados in enumerate(partes, start=1)
-            ]
-            self.adicionar_parte.disabled = len(partes) >= EMBED_PARTES_POR_SLOT
-            self.remover_parte.disabled = len(partes) <= 1
+            self._montar_menu_de_partes()
+            self._montar_menu_de_botoes()
             self._montar_menu_de_cores()
 
         self._sincronizar_componentes()
+
+    def _montar_menu_de_partes(self):
+        """As embeds empilhadas na mensagem, seguidas das ações de empilhar e tirar."""
+        partes = self.partes_do_slot(self.slot_atual)
+        self.parte_atual = min(max(self.parte_atual, 1), len(partes))
+        self.selecionar_parte.placeholder = f"Editando a embed {self.parte_atual} de {len(partes)}"
+
+        opcoes = [
+            discord.SelectOption(
+                label=f"Embed {numero}",
+                value=str(numero),
+                description=self._resumo(dados),
+                emoji=EMOJIS_NUMEROS[numero - 1],
+                default=numero == self.parte_atual,
+            )
+            for numero, dados in enumerate(partes, start=1)
+        ]
+        if len(partes) < EMBED_PARTES_POR_SLOT:
+            opcoes.append(discord.SelectOption(
+                label="Adicionar Embed",
+                value=PARTE_ADICIONAR,
+                description="Empilha mais uma embed nesta mesma mensagem",
+                emoji=EMOJIS_APP.get("add_embed"),
+            ))
+        if len(partes) > 1:
+            opcoes.append(discord.SelectOption(
+                label="Remover Embed",
+                value=PARTE_REMOVER,
+                description=f"Tira a embed {self.parte_atual} da mensagem",
+                emoji=EMOJIS_APP.get("remove_embed"),
+            ))
+        self.selecionar_parte.options = opcoes
+
+    def _montar_menu_de_botoes(self):
+        """Lista os botões da mensagem no menu de remoção, na ordem em que aparecem."""
+        botoes = self.botoes_do_slot(self.slot_atual)
+        self.adicionar_botao.disabled = len(botoes) >= BOTAO_LIMITE_POR_SLOT
+
+        if not botoes:
+            # O Discord exige ao menos uma opção mesmo em um menu desabilitado
+            self.selecionar_botao.disabled = True
+            self.selecionar_botao.options = [
+                discord.SelectOption(label="Nenhum botão criado", value="0")
+            ]
+            return
+
+        self.selecionar_botao.disabled = False
+        # O ícone segue a posição no menu, e não o emoji do botão: um emoji de
+        # servidor apagado derrubaria o painel na hora de renderizar as opções
+        self.selecionar_botao.options = [
+            discord.SelectOption(
+                label=b["rotulo"][:100],
+                value=str(posicao),
+                description=b["url"][:100],
+                emoji=EMOJIS_NUMEROS[posicao],
+            )
+            for posicao, b in enumerate(botoes)
+        ]
 
     def _montar_menu_de_cores(self):
         """Sem cor sempre encabeça o menu; abaixo dela vem a paleta do usuário."""
@@ -735,34 +988,56 @@ class PainelEmbedView(discord.ui.View):
             self.add_item(self.adicionar_embed)
             return
 
-        if self.modo_cores:
+        if self.modo == MODO_CORES:
             self.add_item(self.selecionar_cor)
             for item in (self.voltar_cores, self.encontrar_cores,
                          self.adicionar_cor, self.remover_cor):
                 self.add_item(item)
             return
 
-        # Com uma embed só na mensagem não há o que escolher
-        if len(self.partes_do_slot(self.slot_atual)) > 1:
-            self.add_item(self.selecionar_parte)
+        if self.modo == MODO_BOTOES:
+            self.add_item(self.selecionar_botao)
+            self.add_item(self.voltar_botoes)
+            return
+
+        if self.modo == MODO_JSON:
+            for item in (self.voltar_acoes, self.importar_json, self.exportar_json):
+                self.add_item(item)
+            return
+
+        if self.modo == MODO_ENVIAR:
+            for item in (self.voltar_acoes, self.enviar, self.enviar_personalizado):
+                self.add_item(item)
+            return
+
+        # Linha 0: os botões de link como vão sair na mensagem, colados na embed
+        for botao in self._montar_botoes_de_link():
+            self.add_item(botao)
+        # Linha 1: as embeds empilhadas na mensagem e as ações de empilhar e tirar
+        self.add_item(self.selecionar_parte)
         for item in (self.editar_titulo, self.editar_descricao, self.editar_cor,
                      self.editar_autor, self.editar_rodape):
             self.add_item(item)
-        for item in (self.editar_imagem, self.editar_campos, self.adicionar_botao,
-                     self.remover_botao, self.renomear):
-            self.add_item(item)
-        for item in (self.voltar, self.adicionar_parte, self.remover_parte,
-                     self.importar_json, self.exportar_json):
-            self.add_item(item)
+        self.add_item(self.editar_imagem)
+        self.add_item(self.editar_campos)
+        self.add_item(self.adicionar_botao)
+        # Sem nenhum botão criado não há o que remover
+        if self.botoes_do_slot(self.slot_atual):
+            self.add_item(self.remover_botao)
+        self.add_item(self.renomear)
+        self.add_item(self.voltar)
+        self.add_item(self.abrir_json)
         # O botão de salvar só existe enquanto houver alteração pendente
         if self.tem_alteracoes:
             self.add_item(self.salvar)
-        for item in (self.excluir_embed, self.enviar_personalizado, self.enviar):
-            self.add_item(item)
+        self.add_item(self.excluir_embed)
+        self.add_item(self.abrir_enviar)
 
     @property
     def tem_alteracoes(self) -> bool:
-        return self.slot_atual is not None and self.slot_atual in self.rascunhos
+        return self.slot_atual is not None and (
+            self.slot_atual in self.rascunhos or self.slot_atual in self.rascunhos_botoes
+        )
 
     def rotulo_do_slot(self, slot: int | None) -> str:
         """Nome escolhido pelo usuário, ou 'Embed N' quando ele não deu nome."""
@@ -776,6 +1051,12 @@ class PainelEmbedView(discord.ui.View):
             return self.rascunhos[slot]
         salvas = [e for e in self.embeds if e["slot"] == slot]
         return salvas or [dict(EMBED_PADRAO)]
+
+    def botoes_do_slot(self, slot: int) -> list[dict]:
+        """Botões da mensagem do slot: o rascunho pendente, se houver; senão o salvo."""
+        if slot in self.rascunhos_botoes:
+            return self.rascunhos_botoes[slot]
+        return [b for b in self.botoes if b["slot"] == slot]
 
     def dados_do_slot(self, slot: int) -> dict:
         """Primeira embed do slot — é dela que saem o nome e o resumo do menu."""
@@ -817,6 +1098,18 @@ class PainelEmbedView(discord.ui.View):
         else:
             self.rascunhos[slot] = partes
 
+    def registrar_rascunho_botoes(self, slot: int, botoes: list[dict]):
+        """O mesmo do rascunho da embed, para a lista de botões da mensagem."""
+        salvos = [b for b in self.botoes if b["slot"] == slot]
+        igual = len(salvos) == len(botoes) and all(
+            all(a.get(campo) == b.get(campo) for campo in BOTAO_CAMPOS)
+            for a, b in zip(botoes, salvos)
+        )
+        if igual:
+            self.rascunhos_botoes.pop(slot, None)
+        else:
+            self.rascunhos_botoes[slot] = botoes
+
     def conteudo(self) -> str:
         ocupados = self.slots_ocupados
         total = f"({len(ocupados)}/{EMBED_LIMITE_POR_USUARIO})"
@@ -826,14 +1119,23 @@ class PainelEmbedView(discord.ui.View):
             linha = f"**Painel de Criação e Seleção de Embed** - {total}"
         else:
             nome_embed = self.rotulo_do_slot(self.slot_atual)
-            if self.modo_cores:
-                cabecalho = f'**Painel de Cores** - Editando "{nome_embed}"'
-            else:
-                cabecalho = f'**Painel de Edição de Embed** - Editando "{nome_embed}"'
+            titulo_painel = CABECALHO_POR_MODO.get(self.modo, "Painel de Edição de Embed")
+            cabecalho = f'**{titulo_painel}** - Editando "{nome_embed}"'
             quantidade = len(self.partes_do_slot(self.slot_atual))
             if quantidade > 1:
                 cabecalho += f" - embed {self.parte_atual} de {quantidade}"
             partes = [cabecalho]
+            # A prévia mostra uma linha de botões; o que passa disso vai no texto
+            restantes = self.botoes_do_slot(self.slot_atual)[BOTAO_POR_LINHA:]
+            if restantes and self.modo is None:
+                # O emoji fica fora da crase: dentro dela o Discord não o renderiza
+                lista = " ".join(
+                    f"{b['emoji'] + ' ' if b.get('emoji') else ''}`{b['rotulo']}`"
+                    for b in restantes
+                )
+                partes.append(
+                    f"**Botões fora da prévia** (a mensagem enviada mostra todos): {lista}"
+                )
             if self.slot_atual in self.slots_novos:
                 partes.append("⚠️ Esta embed ainda não esta salva na sua conta ⚠️")
             elif self.tem_alteracoes:
@@ -848,7 +1150,9 @@ class PainelEmbedView(discord.ui.View):
         # Uma embed que nunca foi salva não tem nada a apagar no banco
         if slot not in self.slots_novos:
             embed_remover(self.id_usuario, slot)
+            botao_remover(self.id_usuario, slot)
         self.rascunhos.pop(slot, None)
+        self.rascunhos_botoes.pop(slot, None)
         self.slot_atual = None
         self.recarregar()
         await self.atualizar(interaction)
@@ -888,110 +1192,99 @@ class PainelEmbedView(discord.ui.View):
     async def selecionar_embed(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.slot_atual = int(select.values[0])
         self.parte_atual = 1
-        self.modo_cores = False
+        self.modo = None
         self.recarregar()
         await self.atualizar(interaction)
 
-    @discord.ui.button(label="Adicionar Embed", emoji="<:new_embed:1536200609827524658>", style=discord.ButtonStyle.success, row=4)
+    @discord.ui.button(label="Adicionar Embed", emoji="<:new_embed:1536200609827524658>", style=discord.ButtonStyle.success, row=1)
     async def adicionar_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NovaEmbedModal(self))
 
     # ----------------------------------------------------------- modo edição
 
-    @discord.ui.button(label="Título", emoji="<:title_embed:1536201573200564315>", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Título", emoji="<:title_embed:1536201573200564315>", style=discord.ButtonStyle.secondary, row=2)
     async def editar_titulo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TituloModal(self))
 
-    @discord.ui.button(label="Descrição", emoji="<:description_embed:1536155252498104340>", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Descrição", emoji="<:description_embed:1536155252498104340>", style=discord.ButtonStyle.secondary, row=2)
     async def editar_descricao(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DescricaoModal(self))
 
-    @discord.ui.button(label="Cor", emoji="<:color_embed:1536200617217761350>", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Cor", emoji="<:color_embed:1536200617217761350>", style=discord.ButtonStyle.secondary, row=2)
     async def editar_cor(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.modo_cores = True
+        self.modo = MODO_CORES
         self.recarregar()
         await self.atualizar(interaction)
 
-    @discord.ui.button(label="Autor", emoji="<:author_embed:1536155249096785980>", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Autor", emoji="<:author_embed:1536155249096785980>", style=discord.ButtonStyle.secondary, row=2)
     async def editar_autor(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AutorModal(self))
 
-    @discord.ui.button(label="Rodapé", emoji="<:rodape_embed:1536200607155888139>", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Rodapé", emoji="<:rodape_embed:1536200607155888139>", style=discord.ButtonStyle.secondary, row=2)
     async def editar_rodape(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RodapeModal(self))
 
-    @discord.ui.button(label="Imagem e Thumbnail", emoji="<:image_embed:1536155250149564437>", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Imagem e Thumbnail", emoji="<:image_embed:1536155250149564437>", style=discord.ButtonStyle.secondary, row=3)
     async def editar_imagem(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ImagemModal(self))
 
-    @discord.ui.button(label="Editar Campos", emoji="<:editar_campos_embed:1536200613346672760>", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Editar Campos", emoji="<:editar_campos_embed:1536200613346672760>", style=discord.ButtonStyle.secondary, row=3)
     async def editar_campos(self, interaction: discord.Interaction, button: discord.ui.Button):
         # TODO: gerenciar os fields da embed (adicionar, editar, remover, reordenar)
         await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
 
-    @discord.ui.button(label="Adicionar Botão", emoji="<:add_button_embed:1536155254272557197>", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Adicionar Botão", emoji="<:add_button_embed:1536155254272557197>", style=discord.ButtonStyle.secondary, row=3)
     async def adicionar_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # TODO: adicionar um botão de link à mensagem final
-        await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
+        await interaction.response.send_modal(BotaoLinkModal(self))
 
-    @discord.ui.button(label="Remover Botão", emoji="<:remove_button_embed:1536155255639646268>", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Remover Botão", emoji="<:remove_button_embed:1536155255639646268>", style=discord.ButtonStyle.secondary, row=3)
     async def remover_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # TODO: remover um dos botões de link da mensagem final
-        await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
-
-    @discord.ui.button(label="Renomear", emoji="<:renomear_embed:1536200611006259270>", style=discord.ButtonStyle.secondary, row=2)
-    async def renomear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RenomearModal(self))
-
-    @discord.ui.button(emoji="<:voltar_embed:1536200612226793482>", style=discord.ButtonStyle.secondary, row=3)
-    async def voltar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Os rascunhos são guardados por slot, então voltar não descarta nada
-        self.slot_atual = None
-        self.parte_atual = 1
-        self.modo_cores = False
-        self.recarregar()
-        await self.atualizar(interaction)
-
-    @discord.ui.button(label="Adicionar Embed", emoji="<:add_embed:1536155247368605836>", style=discord.ButtonStyle.secondary, row=3)
-    async def adicionar_parte(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Empilha mais uma embed na mesma mensagem (o Discord aceita até 10)."""
-        partes = [dict(p) for p in self.partes_do_slot(self.slot_atual)]
-        if len(partes) >= EMBED_PARTES_POR_SLOT:
+        botoes = self.botoes_do_slot(self.slot_atual)
+        # O botão nem aparece sem botões criados; a checagem cobre o painel desatualizado
+        if not botoes:
             await interaction.response.send_message(
-                f"Uma mensagem aceita no máximo {EMBED_PARTES_POR_SLOT} embeds.", ephemeral=True
-            )
-            return
-
-        # A nova parte herda só o nome: ele identifica o slot, não a embed
-        partes.append({**EMBED_PADRAO, "nome": partes[0].get("nome")})
-        self.registrar_rascunho(self.slot_atual, partes)
-        self.parte_atual = len(partes)
-        self.recarregar()
-        await self.atualizar(interaction)
-
-    @discord.ui.button(label="Remover Embed", emoji="<:remove_embed:1536155257363628193>", style=discord.ButtonStyle.secondary, row=3)
-    async def remover_parte(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Tira a embed selecionada da mensagem. Para apagar o slot inteiro é o Excluir Embed."""
-        partes = [dict(p) for p in self.partes_do_slot(self.slot_atual)]
-        if len(partes) <= 1:
-            await interaction.response.send_message(
-                "A mensagem precisa de pelo menos uma embed. Use **Excluir Embed** para apagar tudo.",
+                "Esta mensagem ainda não tem botões. Use **Adicionar Botão** para criar um.",
                 ephemeral=True,
             )
             return
 
-        partes.pop(self.parte_atual - 1)
-        self.registrar_rascunho(self.slot_atual, partes)
-        self.parte_atual = min(self.parte_atual, len(partes))
+        # Com um botão só não há escolha a fazer: o clique já remove
+        if len(botoes) == 1:
+            self.registrar_rascunho_botoes(self.slot_atual, [])
+            self.modo = None
+            self.recarregar()
+            await self.atualizar(interaction)
+            return
+
+        self.modo = MODO_BOTOES
         self.recarregar()
         await self.atualizar(interaction)
 
-    @discord.ui.button(label="Importar JSON", emoji="<:import_embed:1536154668906979358>", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Renomear", emoji="<:renomear_embed:1536200611006259270>", style=discord.ButtonStyle.secondary, row=3)
+    async def renomear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RenomearModal(self))
+
+    @discord.ui.button(emoji="<:voltar_embed:1536200612226793482>", style=discord.ButtonStyle.secondary, row=4)
+    async def voltar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Os rascunhos são guardados por slot, então voltar não descarta nada
+        self.slot_atual = None
+        self.parte_atual = 1
+        self.modo = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="JSON", emoji="<:import_embed:1536154668906979358>", style=discord.ButtonStyle.primary, row=4)
+    async def abrir_json(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.modo = MODO_JSON
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Importar JSON", emoji="<:import_embed:1536154668906979358>", style=discord.ButtonStyle.primary, row=1)
     async def importar_json(self, interaction: discord.Interaction, button: discord.ui.Button):
         # TODO: carregar uma embed a partir de um JSON colado pelo usuário
         await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
 
-    @discord.ui.button(label="Exportar JSON", emoji="<:export_embed:1536154667359408221>", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Exportar JSON", emoji="<:export_embed:1536154667359408221>", style=discord.ButtonStyle.primary, row=1)
     async def exportar_json(self, interaction: discord.Interaction, button: discord.ui.Button):
         # TODO: devolver a embed atual serializada em JSON
         await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
@@ -1000,7 +1293,8 @@ class PainelEmbedView(discord.ui.View):
     async def salvar(self, interaction: discord.Interaction, button: discord.ui.Button):
         slot = self.slot_atual
         rascunho = self.rascunhos.get(slot)
-        if rascunho is None:
+        rascunho_botoes = self.rascunhos_botoes.get(slot)
+        if rascunho is None and rascunho_botoes is None:
             await interaction.response.send_message("Não há alterações pendentes.", ephemeral=True)
             return
 
@@ -1012,7 +1306,11 @@ class PainelEmbedView(discord.ui.View):
             return
 
         self.rascunhos.pop(slot, None)
-        embed_salvar_slot(self.id_usuario, slot, rascunho)
+        self.rascunhos_botoes.pop(slot, None)
+        if rascunho is not None:
+            embed_salvar_slot(self.id_usuario, slot, rascunho)
+        if rascunho_botoes is not None:
+            botao_salvar_slot(self.id_usuario, slot, rascunho_botoes)
 
         self.recarregar()
         await self.atualizar(interaction)
@@ -1021,12 +1319,18 @@ class PainelEmbedView(discord.ui.View):
     async def excluir_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ExcluirEmbedModal(self))
 
-    @discord.ui.button(label="Enviar Personalizado", emoji="<:enviar_personalizado_embed:1536203707052462120>", style=discord.ButtonStyle.success, row=4)
+    @discord.ui.button(label="Enviar", emoji="<:enviar_embed:1536200615422853161>", style=discord.ButtonStyle.success, row=4)
+    async def abrir_enviar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.modo = MODO_ENVIAR
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    @discord.ui.button(label="Enviar Personalizado", emoji="<:enviar_personalizado_embed:1536203707052462120>", style=discord.ButtonStyle.success, row=1)
     async def enviar_personalizado(self, interaction: discord.Interaction, button: discord.ui.Button):
         # TODO: enviar a mensagem via webhook com nome/avatar personalizados
         await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
 
-    @discord.ui.button(label="Enviar", emoji="<:enviar_embed:1536200615422853161>", style=discord.ButtonStyle.success, row=4)
+    @discord.ui.button(label="Enviar", emoji="<:enviar_embed:1536200615422853161>", style=discord.ButtonStyle.success, row=1)
     async def enviar(self, interaction: discord.Interaction, button: discord.ui.Button):
         # TODO: enviar a embed montada no canal escolhido
         await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
