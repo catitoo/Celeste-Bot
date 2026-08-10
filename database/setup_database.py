@@ -78,9 +78,13 @@ class EmbedPersonalizado(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     id_usuario = Column(Integer, index=True, nullable=False)
     slot = Column(Integer, nullable=False)  # numeração exibida no painel: "Embed 1", "Embed 2"...
+    # Posição da embed dentro da mensagem do slot (1..10). Uma mensagem do Discord
+    # aceita várias embeds empilhadas; cada uma é uma linha desta tabela.
+    parte = Column(Integer, nullable=False, default=1, server_default="1")
     nome = Column(Text, nullable=True)  # apelido opcional mostrado no menu do painel
 
     titulo = Column(Text, nullable=True)
+    titulo_url = Column(Text, nullable=True)  # deixa o título clicável
     descricao = Column(Text, nullable=True)
     cor = Column(Integer, nullable=True)
     imagem = Column(Text, nullable=True)
@@ -94,7 +98,22 @@ class EmbedPersonalizado(Base):
     atualizado_em = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("id_usuario", "slot", name="uq_embed_usuario_slot"),
+        UniqueConstraint("id_usuario", "slot", "parte", name="uq_embed_usuario_slot_parte"),
+    )
+
+class CorPersonalizada(Base):
+    """Paleta de cores do usuário, reaproveitada em qualquer embed e servidor."""
+    __tablename__ = "cores_personalizadas"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    nome = Column(Text, nullable=False)
+    cor = Column(Integer, nullable=False)
+
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("id_usuario", "nome", name="uq_cor_usuario_nome"),
     )
 
 class FormulariosDesenvolvedor(Base):
@@ -251,6 +270,7 @@ def registrar_punicao(guild_id: int, user_id: int, motivo: str, autor_id: int | 
 EMBED_CAMPOS = (
     "nome",
     "titulo",
+    "titulo_url",
     "descricao",
     "cor",
     "imagem",
@@ -262,8 +282,43 @@ EMBED_CAMPOS = (
     "rodape_icone",
 )
 EMBED_LIMITE_POR_USUARIO = 25
+# Teto de embeds empilhadas em uma mesma mensagem, imposto pelo Discord.
+EMBED_PARTES_POR_SLOT = 10
 
 _tabela_embeds_pronta = False
+
+
+def _migrar_unique_para_parte(conn):
+    """Troca o UNIQUE(id_usuario, slot) antigo por UNIQUE(id_usuario, slot, parte).
+
+    O SQLite não altera constraint no lugar, então a tabela é reconstruída. Roda
+    dentro da transação do chamador: ou a migração inteira passa, ou nada muda.
+    """
+    sql_atual = conn.execute(sql_text(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='embeds_personalizados'"
+    )).scalar()
+    if not sql_atual or "uq_embed_usuario_slot " not in sql_atual + " ":
+        return
+
+    colunas = [
+        linha[1] for linha in conn.execute(sql_text("PRAGMA table_info(embeds_personalizados)"))
+        if linha[1] != "id"
+    ]
+    lista_colunas = ", ".join(f'"{c}"' for c in colunas)
+    linhas = conn.execute(sql_text(
+        f"SELECT {lista_colunas} FROM embeds_personalizados"
+    )).fetchall()
+
+    conn.execute(sql_text("DROP TABLE embeds_personalizados"))
+    EmbedPersonalizado.__table__.create(bind=conn)
+
+    if linhas:
+        marcadores = ", ".join(f":{c}" for c in colunas)
+        conn.execute(
+            sql_text(f"INSERT INTO embeds_personalizados ({lista_colunas}) VALUES ({marcadores})"),
+            [dict(zip(colunas, linha)) for linha in linhas],
+        )
+    logger.info("Tabela embeds_personalizados reconstruída com a coluna 'parte'.")
 
 
 def _garantir_tabela_embeds():
@@ -274,18 +329,21 @@ def _garantir_tabela_embeds():
 
     EmbedPersonalizado.__table__.create(bind=engine, checkfirst=True)
 
-    # Acrescenta colunas que não existiam em versões anteriores da tabela
     with engine.begin() as conn:
+        # Acrescenta colunas que não existiam em versões anteriores da tabela
         existentes = {
             linha[1] for linha in conn.execute(sql_text("PRAGMA table_info(embeds_personalizados)"))
         }
         for coluna in EmbedPersonalizado.__table__.columns:
             if coluna.name not in existentes:
                 tipo = coluna.type.compile(engine.dialect)
+                padrao = " NOT NULL DEFAULT 1" if coluna.name == "parte" else ""
                 conn.execute(sql_text(
-                    f'ALTER TABLE embeds_personalizados ADD COLUMN "{coluna.name}" {tipo}'
+                    f'ALTER TABLE embeds_personalizados ADD COLUMN "{coluna.name}" {tipo}{padrao}'
                 ))
                 logger.info("Coluna '%s' adicionada em embeds_personalizados.", coluna.name)
+
+        _migrar_unique_para_parte(conn)
 
     _tabela_embeds_pronta = True
 
@@ -293,19 +351,20 @@ def _garantir_tabela_embeds():
 def _embed_para_dict(row: EmbedPersonalizado) -> dict:
     dados = {campo: getattr(row, campo) for campo in EMBED_CAMPOS}
     dados["slot"] = int(row.slot)
+    dados["parte"] = int(row.parte or 1)
     dados["cor"] = int(row.cor) if row.cor is not None else None
     return dados
 
 
 def embed_listar(id_usuario: int) -> list[dict]:
-    """Retorna as embeds do usuário (válidas em qualquer servidor), ordenadas pelo slot."""
+    """Retorna as embeds do usuário (válidas em qualquer servidor), ordenadas por slot e parte."""
     _garantir_tabela_embeds()
     session = SessionLocal()
     try:
         rows = (
             session.query(EmbedPersonalizado)
             .filter_by(id_usuario=int(id_usuario))
-            .order_by(EmbedPersonalizado.slot)
+            .order_by(EmbedPersonalizado.slot, EmbedPersonalizado.parte)
             .all()
         )
         return [_embed_para_dict(r) for r in rows]
@@ -313,33 +372,36 @@ def embed_listar(id_usuario: int) -> list[dict]:
         session.close()
 
 
-def embed_obter(id_usuario: int, slot: int) -> dict | None:
+def embed_obter(id_usuario: int, slot: int, parte: int = 1) -> dict | None:
     _garantir_tabela_embeds()
     session = SessionLocal()
     try:
         row = session.query(EmbedPersonalizado).filter_by(
             id_usuario=int(id_usuario),
             slot=int(slot),
+            parte=int(parte),
         ).first()
         return _embed_para_dict(row) if row else None
     finally:
         session.close()
 
 
-def embed_salvar(id_usuario: int, slot: int, **campos) -> dict:
-    """Cria ou atualiza a embed do slot informado e devolve o estado salvo."""
+def embed_salvar(id_usuario: int, slot: int, parte: int = 1, **campos) -> dict:
+    """Cria ou atualiza uma parte do slot informado e devolve o estado salvo."""
     _garantir_tabela_embeds()
     session = SessionLocal()
     try:
         row = session.query(EmbedPersonalizado).filter_by(
             id_usuario=int(id_usuario),
             slot=int(slot),
+            parte=int(parte),
         ).first()
 
         if not row:
             row = EmbedPersonalizado(
                 id_usuario=int(id_usuario),
                 slot=int(slot),
+                parte=int(parte),
             )
             session.add(row)
 
@@ -353,15 +415,34 @@ def embed_salvar(id_usuario: int, slot: int, **campos) -> dict:
         session.close()
 
 
-def embed_remover(id_usuario: int, slot: int) -> bool:
-    """Apaga a embed do slot informado. Retorna True se havia algo para apagar."""
+def embed_salvar_slot(id_usuario: int, slot: int, partes: list[dict]) -> list[dict]:
+    """Grava o slot inteiro: cada item da lista vira uma parte (1..N) e as partes
+    que sobraram de uma versão anterior maior são apagadas."""
+    _garantir_tabela_embeds()
+    for indice, dados in enumerate(partes, start=1):
+        embed_salvar(
+            id_usuario, slot, indice,
+            **{campo: dados.get(campo) for campo in EMBED_CAMPOS},
+        )
+    embed_remover(id_usuario, slot, acima_de=len(partes))
+    return [d for d in embed_listar(id_usuario) if d["slot"] == int(slot)]
+
+
+def embed_remover(id_usuario: int, slot: int, parte: int | None = None, acima_de: int | None = None) -> bool:
+    """Apaga o slot inteiro, uma parte específica, ou as partes acima de um limite.
+    Retorna True se havia algo para apagar."""
     _garantir_tabela_embeds()
     session = SessionLocal()
     try:
-        removidas = session.query(EmbedPersonalizado).filter_by(
+        consulta = session.query(EmbedPersonalizado).filter_by(
             id_usuario=int(id_usuario),
             slot=int(slot),
-        ).delete()
+        )
+        if parte is not None:
+            consulta = consulta.filter(EmbedPersonalizado.parte == int(parte))
+        if acima_de is not None:
+            consulta = consulta.filter(EmbedPersonalizado.parte > int(acima_de))
+        removidas = consulta.delete()
         session.commit()
         return bool(removidas)
     finally:
@@ -385,7 +466,71 @@ def embed_criar(id_usuario: int, **campos) -> dict | None:
         return None
 
     slot = next(n for n in range(1, EMBED_LIMITE_POR_USUARIO + 1) if n not in usados)
-    return embed_salvar(id_usuario, slot, **campos)
+    return embed_salvar(id_usuario, slot, 1, **campos)
+
+
+# A opção "Sem cor" ocupa um lugar no menu, que aceita 25 no total.
+COR_LIMITE_POR_USUARIO = 24
+
+_tabela_cores_pronta = False
+
+
+def _garantir_tabela_cores():
+    global _tabela_cores_pronta
+    if _tabela_cores_pronta:
+        return
+    CorPersonalizada.__table__.create(bind=engine, checkfirst=True)
+    _tabela_cores_pronta = True
+
+
+def cor_listar(id_usuario: int) -> list[dict]:
+    """Cores salvas do usuário, na ordem em que foram criadas."""
+    _garantir_tabela_cores()
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(CorPersonalizada)
+            .filter_by(id_usuario=int(id_usuario))
+            .order_by(CorPersonalizada.id)
+            .all()
+        )
+        return [{"nome": r.nome, "cor": int(r.cor)} for r in rows]
+    finally:
+        session.close()
+
+
+def cor_salvar(id_usuario: int, nome: str, cor: int) -> dict:
+    """Cria a cor ou atualiza o valor de uma já existente com o mesmo nome."""
+    _garantir_tabela_cores()
+    session = SessionLocal()
+    try:
+        row = session.query(CorPersonalizada).filter_by(
+            id_usuario=int(id_usuario),
+            nome=nome,
+        ).first()
+        if not row:
+            row = CorPersonalizada(id_usuario=int(id_usuario), nome=nome)
+            session.add(row)
+        row.cor = int(cor)
+        session.commit()
+        return {"nome": row.nome, "cor": int(row.cor)}
+    finally:
+        session.close()
+
+
+def cor_remover(id_usuario: int, nome: str) -> bool:
+    """Apaga a cor pelo nome. Retorna True se havia algo para apagar."""
+    _garantir_tabela_cores()
+    session = SessionLocal()
+    try:
+        removidas = session.query(CorPersonalizada).filter_by(
+            id_usuario=int(id_usuario),
+            nome=nome,
+        ).delete()
+        session.commit()
+        return bool(removidas)
+    finally:
+        session.close()
 
 
 def criar_tabelas():
