@@ -8,6 +8,8 @@ from discord.ext import commands
 from database.setup_database import (
     BOTAO_CAMPOS,
     BOTAO_LIMITE_POR_SLOT,
+    CAMPO_CAMPOS,
+    CAMPO_LIMITE_POR_EMBED,
     COR_LIMITE_POR_USUARIO,
     EMBED_CAMPOS,
     EMBED_LIMITE_POR_USUARIO,
@@ -33,6 +35,13 @@ EMBED_PADRAO = {
     "rodape": "Use os botões abaixo para montar a sua mensagem.",
     "cor": COR_PADRAO,
 }
+
+
+def embed_padrao() -> dict:
+    """Cópia nova do template, com a lista de campos própria: um dict compartilhado
+    deixaria as partes editando a mesma lista."""
+    return {**EMBED_PADRAO, "campos": []}
+
 
 PADRAO_COR_HEX = re.compile(r"^#?([0-9a-fA-F]{6})$")
 PADRAO_URL = re.compile(r"^https?://\S+$", re.IGNORECASE)
@@ -60,15 +69,21 @@ PARTE_REMOVER = "__remover_parte__"
 # conjunto próprio, porque a mensagem só aceita 5 linhas no total.
 MODO_CORES = "cores"
 MODO_BOTOES = "botoes"
+MODO_CAMPOS = "campos"
 MODO_JSON = "json"
 MODO_ENVIAR = "enviar"
 
 CABECALHO_POR_MODO = {
     MODO_CORES: "Painel de Cores",
     MODO_BOTOES: "Remover Botão",
+    MODO_CAMPOS: "Painel de Campos",
     MODO_JSON: "Importar e Exportar JSON",
     MODO_ENVIAR: "Enviar Mensagem",
 }
+
+# Respostas aceitas na pergunta "Em Linha" do formulário de campo
+RESPOSTAS_SIM = {"sim", "s", "yes", "y", "true", "1", "v", "verdadeiro"}
+RESPOSTAS_NAO = {"nao", "não", "n", "no", "false", "0", "f", "falso"}
 
 # A prévia dos botões de link ocupa uma linha só, e uma linha comporta 5 botões
 BOTAO_POR_LINHA = 5
@@ -169,6 +184,15 @@ def montar_embed(dados: dict) -> discord.Embed:
         colour=discord.Colour(cor) if cor is not None else None,
     )
 
+    for campo in (dados.get("campos") or [])[:CAMPO_LIMITE_POR_EMBED]:
+        # O Discord recusa nome ou valor vazio: o caractere invisível preenche o
+        # que ficou em branco, que é como se monta campo só com valor ou só com nome
+        embed.add_field(
+            name=(campo.get("nome") or "").strip() or "\u200b",
+            value=(campo.get("valor") or "").strip() or "\u200b",
+            inline=bool(campo.get("em_linha")),
+        )
+
     if dados.get("imagem"):
         embed.set_image(url=dados["imagem"])
     if dados.get("thumbnail"):
@@ -186,15 +210,25 @@ def montar_embed(dados: dict) -> discord.Embed:
 
     # Uma embed sem nenhum conteúdo visível não é aceita pelo Discord
     visiveis = ("titulo", "descricao", "imagem", "thumbnail", "autor_nome", "rodape")
-    if not any(dados.get(campo) for campo in visiveis):
+    if not embed.fields and not any(dados.get(campo) for campo in visiveis):
         embed.description = "*Embed vazia — use os botões abaixo para preencher.*"
 
     return embed
 
 
+def mesmos_campos(a: list[dict], b: list[dict]) -> bool:
+    """Compara duas listas de campos posição por posição."""
+    return len(a) == len(b) and all(
+        all(x.get(chave) == y.get(chave) for chave in CAMPO_CAMPOS)
+        for x, y in zip(a, b)
+    )
+
+
 def mesmo_conteudo(a: dict, b: dict) -> bool:
     """Compara apenas os campos que são persistidos."""
-    return all(a.get(campo) == b.get(campo) for campo in EMBED_CAMPOS)
+    if not all(a.get(campo) == b.get(campo) for campo in EMBED_CAMPOS):
+        return False
+    return mesmos_campos(a.get("campos") or [], b.get("campos") or [])
 
 
 def texto_ou_nada(valor: str | None) -> str | None:
@@ -223,6 +257,16 @@ def validar_url(texto: str | None, campo: str) -> str | None:
     if not PADRAO_URL.match(texto):
         raise ValueError(f"{campo} inválida. Verifique o endereço digitado.")
     return texto
+
+
+def converter_em_linha(texto: str | None) -> bool:
+    """Lê a resposta Sim/Não da pergunta "Em Linha" do formulário de campo."""
+    valor = (texto or "").strip().lower()
+    if valor in RESPOSTAS_SIM:
+        return True
+    if valor in RESPOSTAS_NAO:
+        return False
+    raise ValueError("Responda **Sim** ou **Não** em *Em Linha*.")
 
 
 def validar_emoji(texto: str | None) -> str | None:
@@ -274,7 +318,7 @@ class NovaEmbedModal(discord.ui.Modal, title="Nova Embed"):
 
         # A embed nasce como rascunho: só vai para o banco quando o usuário salvar
         self.painel.rascunhos[slot] = [{
-            **EMBED_PADRAO,
+            **embed_padrao(),
             "nome": texto_ou_nada(self.nome.value),
         }]
         self.painel.slot_atual = slot
@@ -530,6 +574,86 @@ class BotaoLinkModal(discord.ui.Modal, title="Crie seu Botão de Link"):
         await self.painel.atualizar(interaction)
 
 
+class CampoEmbedModal(discord.ui.Modal, title="Configure um campo"):
+    """Formulário de um campo (field) da embed. Serve para criar e para editar: o
+    índice diz qual campo está sendo alterado, e None cria um novo."""
+
+    def __init__(self, painel: "PainelEmbedView", indice: int | None = None):
+        super().__init__(timeout=600)
+        self.painel = painel
+        self.indice = indice
+        atual = painel.campos_atuais[indice] if indice is not None else {}
+
+        self.nome = discord.ui.TextInput(
+            label="Título",
+            placeholder="Vazio deixa o título invisível, permitidas certas formatações.",
+            required=False,
+            max_length=256,
+            default=atual.get("nome") or "",
+        )
+        self.valor = discord.ui.TextInput(
+            label="Parágrafo",
+            placeholder="Vazio deixa o parágrafo invisível, permitido formatação.",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=1024,
+            default=atual.get("valor") or "",
+        )
+        self.em_linha = discord.ui.TextInput(
+            label="Em Linha",
+            placeholder="O campo deve continuar na mesma linha? (Sim ou Não)",
+            required=True,
+            max_length=16,
+            default=("Sim" if atual.get("em_linha") else "Não") if indice is not None else "",
+        )
+        for item in (self.nome, self.valor, self.em_linha):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            em_linha = converter_em_linha(self.em_linha.value)
+        except ValueError as erro:
+            await interaction.response.send_message(str(erro), ephemeral=True)
+            return
+
+        nome = texto_ou_nada(self.nome.value)
+        valor = texto_ou_nada(self.valor.value)
+        # Um dos dois em branco fica invisível; os dois deixariam um campo que
+        # ocupa espaço na embed sem mostrar nada
+        if nome is None and valor is None:
+            await interaction.response.send_message(
+                "Preencha o título ou o parágrafo do campo — os dois em branco deixariam o campo invisível.",
+                ephemeral=True,
+            )
+            return
+
+        campo = {"nome": nome, "valor": valor, "em_linha": em_linha}
+        campos = [dict(c) for c in self.painel.campos_atuais]
+
+        if self.indice is None:
+            if len(campos) >= CAMPO_LIMITE_POR_EMBED:
+                await interaction.response.send_message(
+                    f"Uma embed aceita no máximo {CAMPO_LIMITE_POR_EMBED} campos.", ephemeral=True
+                )
+                return
+            campos.append(campo)
+            self.painel.campo_atual = len(campos) - 1
+        elif self.indice < len(campos):
+            campos[self.indice] = campo
+            self.painel.campo_atual = self.indice
+        else:
+            # O campo saiu do painel enquanto o formulário estava aberto
+            await interaction.response.send_message(
+                "Este campo não existe mais. Use **Adicionar Campo** para criá-lo de novo.",
+                ephemeral=True,
+            )
+            return
+
+        self.painel.aplicar_alteracoes({"campos": campos})
+        self.painel.recarregar()
+        await self.painel.atualizar(interaction)
+
+
 class AutorModal(CampoModal):
     def __init__(self, painel: "PainelEmbedView"):
         super().__init__(painel, titulo_modal(painel, "Alterar Autor"))
@@ -636,8 +760,10 @@ class PainelEmbedView(discord.ui.View):
         # Ficam separados das embeds porque pertencem à mensagem, não a uma embed.
         self.botoes: list[dict] = []
         self.rascunhos_botoes: dict[int, list[dict]] = {}
-        # Submodo aberto por Cor, Remover Botão, JSON ou Enviar; None é a edição
+        # Submodo aberto por Cor, Campos, Remover Botão, JSON ou Enviar; None é a edição
         self.modo: str | None = None
+        # Campo selecionado no modo campos, por posição na embed em edição
+        self.campo_atual: int | None = None
         self.cores: list[dict] = []
         # Criado na mão, e não por decorator: a linha 0 do painel de edição é da
         # prévia dos botões de link, montada a cada render.
@@ -658,6 +784,35 @@ class PainelEmbedView(discord.ui.View):
         # Botão de link não tem callback: o Discord só abre a URL
         self.encontrar_cores = discord.ui.Button(
             label="Encontrar Cores", url="https://htmlcolorcodes.com", row=1)
+        # Componentes do modo campos: o menu escolhe o campo em que Editar e
+        # Remover agem, do mesmo jeito que o menu de cores
+        self.selecionar_campo = discord.ui.Select(
+            placeholder="Selecione um campo", row=0)
+        self.selecionar_campo.callback = self._escolher_campo
+        self.voltar_campos = discord.ui.Button(
+            emoji=EMOJI_VOLTAR, style=discord.ButtonStyle.secondary, row=1)
+        self.voltar_campos.callback = self._sair_dos_campos
+        self.adicionar_campo = discord.ui.Button(
+            label="Adicionar Campo",
+            emoji=EMOJIS_APP.get("add_embed"),
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+        self.adicionar_campo.callback = self._abrir_novo_campo
+        self.editar_campo = discord.ui.Button(
+            label="Editar Campo",
+            emoji=EMOJIS_APP.get("editar_campos_embed"),
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        self.editar_campo.callback = self._abrir_edicao_de_campo
+        self.remover_campo = discord.ui.Button(
+            label="Remover Campo",
+            emoji=EMOJIS_APP.get("remove_embed"),
+            style=discord.ButtonStyle.danger,
+            row=1,
+        )
+        self.remover_campo.callback = self._remover_campo
         # Componentes do modo de remoção de botões, pelo mesmo motivo
         self.selecionar_botao = discord.ui.Select(
             placeholder="Selecione o botão que quer remover", row=0)
@@ -716,6 +871,49 @@ class PainelEmbedView(discord.ui.View):
             return None
         return next((c["nome"] for c in self.cores if c["cor"] == cor), None)
 
+    # --------------------------------------------------------------- campos
+
+    async def _escolher_campo(self, interaction: discord.Interaction):
+        """A escolha no menu só marca em qual campo Editar e Remover vão agir."""
+        self.campo_atual = int(self.selecionar_campo.values[0])
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _sair_dos_campos(self, interaction: discord.Interaction):
+        self.modo = None
+        self.recarregar()
+        await self.atualizar(interaction)
+
+    async def _abrir_novo_campo(self, interaction: discord.Interaction):
+        if len(self.campos_atuais) >= CAMPO_LIMITE_POR_EMBED:
+            await interaction.response.send_message(
+                f"Uma embed aceita no máximo {CAMPO_LIMITE_POR_EMBED} campos.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(CampoEmbedModal(self))
+
+    async def _abrir_edicao_de_campo(self, interaction: discord.Interaction):
+        if self.campo_atual is None:
+            await interaction.response.send_message(
+                "Selecione no menu o campo que quer editar.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(CampoEmbedModal(self, self.campo_atual))
+
+    async def _remover_campo(self, interaction: discord.Interaction):
+        if self.campo_atual is None:
+            await interaction.response.send_message(
+                "Selecione no menu o campo que quer remover.", ephemeral=True
+            )
+            return
+
+        campos = [dict(c) for c in self.campos_atuais]
+        campos.pop(self.campo_atual)
+        self.campo_atual = None
+        self.aplicar_alteracoes({"campos": campos})
+        self.recarregar()
+        await self.atualizar(interaction)
+
     # --------------------------------------------------------------- botões
 
     async def _remover_botao_escolhido(self, interaction: discord.Interaction):
@@ -765,7 +963,10 @@ class PainelEmbedView(discord.ui.View):
         inteiro com 'Invalid emoji' na hora de renderizar."""
         if not EMOJIS_APP:
             return
-        for item in [*self.children, self.voltar_cores, self.voltar_botoes, self.voltar_acoes]:
+        manuais = (self.voltar_cores, self.voltar_botoes, self.voltar_acoes,
+                   self.voltar_campos, self.editar_campo,
+                   self.adicionar_campo, self.remover_campo)
+        for item in [*self.children, *manuais]:
             emoji = getattr(item, "emoji", None)
             # Emoji unicode (sem id) não depende da aplicação
             if emoji is None or emoji.id is None:
@@ -776,6 +977,8 @@ class PainelEmbedView(discord.ui.View):
         """O menu troca de embed e também empilha ou tira uma: as duas ações
         moram aqui porque não sobra espaço para botões próprios no painel."""
         escolha = self.selecionar_parte.values[0]
+        # A seleção de campo é por embed: outra embed tem outra lista de campos
+        self.campo_atual = None
         if escolha == PARTE_ADICIONAR:
             await self._adicionar_parte(interaction)
             return
@@ -797,7 +1000,7 @@ class PainelEmbedView(discord.ui.View):
             return
 
         # A nova parte herda só o nome: ele identifica o slot, não a embed
-        partes.append({**EMBED_PADRAO, "nome": partes[0].get("nome")})
+        partes.append({**embed_padrao(), "nome": partes[0].get("nome")})
         self.registrar_rascunho(self.slot_atual, partes)
         self.parte_atual = len(partes)
         self.recarregar()
@@ -858,6 +1061,7 @@ class PainelEmbedView(discord.ui.View):
         if self.slot_atual is not None:
             self._montar_menu_de_partes()
             self._montar_menu_de_botoes()
+            self._montar_menu_de_campos()
             self._montar_menu_de_cores()
 
         self._sincronizar_componentes()
@@ -918,6 +1122,40 @@ class PainelEmbedView(discord.ui.View):
                 emoji=EMOJIS_NUMEROS[posicao],
             )
             for posicao, b in enumerate(botoes)
+        ]
+
+    def _montar_menu_de_campos(self):
+        """Lista os campos da embed em edição, na ordem em que aparecem nela."""
+        campos = self.campos_atuais
+        # Um campo removido não deixa seleção pendente atrás de si
+        if self.campo_atual is not None and not 0 <= self.campo_atual < len(campos):
+            self.campo_atual = None
+
+        self.adicionar_campo.disabled = len(campos) >= CAMPO_LIMITE_POR_EMBED
+        self.editar_campo.disabled = self.campo_atual is None
+        self.remover_campo.disabled = self.campo_atual is None
+
+        if not campos:
+            # O Discord exige ao menos uma opção mesmo em um menu desabilitado
+            self.selecionar_campo.disabled = True
+            self.selecionar_campo.placeholder = "Nenhum campo criado — use Adicionar Campo"
+            self.selecionar_campo.options = [
+                discord.SelectOption(label="Nenhum campo criado", value="0")
+            ]
+            return
+
+        self.selecionar_campo.disabled = False
+        self.selecionar_campo.placeholder = "Selecione o campo que quer editar ou remover"
+        # O ícone segue a posição no menu, como nos outros seletores do painel
+        self.selecionar_campo.options = [
+            discord.SelectOption(
+                label=(c.get("nome") or "Sem título")[:100],
+                value=str(posicao),
+                description=((c.get("valor") or "").strip() or "Sem parágrafo")[:100],
+                emoji=EMOJIS_NUMEROS[posicao],
+                default=posicao == self.campo_atual,
+            )
+            for posicao, c in enumerate(campos)
         ]
 
     def _montar_menu_de_cores(self):
@@ -995,6 +1233,13 @@ class PainelEmbedView(discord.ui.View):
                 self.add_item(item)
             return
 
+        if self.modo == MODO_CAMPOS:
+            self.add_item(self.selecionar_campo)
+            for item in (self.voltar_campos, self.adicionar_campo,
+                         self.editar_campo, self.remover_campo):
+                self.add_item(item)
+            return
+
         if self.modo == MODO_BOTOES:
             self.add_item(self.selecionar_botao)
             self.add_item(self.voltar_botoes)
@@ -1050,7 +1295,7 @@ class PainelEmbedView(discord.ui.View):
         if slot in self.rascunhos:
             return self.rascunhos[slot]
         salvas = [e for e in self.embeds if e["slot"] == slot]
-        return salvas or [dict(EMBED_PADRAO)]
+        return salvas or [embed_padrao()]
 
     def botoes_do_slot(self, slot: int) -> list[dict]:
         """Botões da mensagem do slot: o rascunho pendente, se houver; senão o salvo."""
@@ -1066,9 +1311,14 @@ class PainelEmbedView(discord.ui.View):
     def dados_atuais(self) -> dict:
         """Dados da embed selecionada; sem seleção, o template de exemplo."""
         if self.slot_atual is None:
-            return dict(EMBED_PADRAO)
+            return embed_padrao()
         partes = self.partes_do_slot(self.slot_atual)
         return partes[min(self.parte_atual, len(partes)) - 1]
+
+    @property
+    def campos_atuais(self) -> list[dict]:
+        """Campos da embed selecionada, na ordem em que aparecem nela."""
+        return self.dados_atuais.get("campos") or []
 
     def previa(self) -> list[discord.Embed]:
         """A prévia só existe no modo edição: a lista não mostra embed nenhuma."""
@@ -1193,6 +1443,7 @@ class PainelEmbedView(discord.ui.View):
         self.slot_atual = int(select.values[0])
         self.parte_atual = 1
         self.modo = None
+        self.campo_atual = None
         self.recarregar()
         await self.atualizar(interaction)
 
@@ -1230,8 +1481,11 @@ class PainelEmbedView(discord.ui.View):
 
     @discord.ui.button(label="Editar Campos", emoji="<:editar_campos_embed:1536200613346672760>", style=discord.ButtonStyle.secondary, row=3)
     async def editar_campos(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # TODO: gerenciar os fields da embed (adicionar, editar, remover, reordenar)
-        await interaction.response.send_message("Ainda não implementado.", ephemeral=True)
+        self.modo = MODO_CAMPOS
+        # O painel abre sem campo escolhido: Editar e Remover ficam desabilitados
+        self.campo_atual = None
+        self.recarregar()
+        await self.atualizar(interaction)
 
     @discord.ui.button(label="Adicionar Botão", emoji="<:add_button_embed:1536155254272557197>", style=discord.ButtonStyle.secondary, row=3)
     async def adicionar_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1270,6 +1524,7 @@ class PainelEmbedView(discord.ui.View):
         self.slot_atual = None
         self.parte_atual = 1
         self.modo = None
+        self.campo_atual = None
         self.recarregar()
         await self.atualizar(interaction)
 

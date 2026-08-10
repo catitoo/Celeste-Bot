@@ -121,6 +121,29 @@ class BotaoPersonalizado(Base):
         UniqueConstraint("id_usuario", "slot", "posicao", name="uq_botao_usuario_slot_posicao"),
     )
 
+class CampoPersonalizado(Base):
+    """Campos (fields) de uma embed. Pertencem a uma das embeds empilhadas do slot,
+    e não à mensagem inteira, por isso guardam também a parte."""
+    __tablename__ = "campos_personalizados"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id_usuario = Column(Integer, index=True, nullable=False)
+    slot = Column(Integer, nullable=False)  # o mesmo slot da embed no painel
+    parte = Column(Integer, nullable=False, default=1)  # qual embed empilhada do slot
+    posicao = Column(Integer, nullable=False, default=1)  # ordem dentro da embed (1..25)
+
+    # Nome e valor podem ficar em branco (um deles): a embed mostra o campo com o
+    # lado vazio invisível. A coluna do nome segue NOT NULL guardando "" nesse caso.
+    nome = Column(Text, nullable=False, default="")
+    valor = Column(Text, nullable=True)
+    em_linha = Column(Boolean, default=False, nullable=False)
+
+    atualizado_em = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("id_usuario", "slot", "parte", "posicao", name="uq_campo_usuario_slot_parte_posicao"),
+    )
+
 class CorPersonalizada(Base):
     """Paleta de cores do usuário, reaproveitada em qualquer embed e servidor."""
     __tablename__ = "cores_personalizadas"
@@ -377,7 +400,8 @@ def _embed_para_dict(row: EmbedPersonalizado) -> dict:
 
 
 def embed_listar(id_usuario: int) -> list[dict]:
-    """Retorna as embeds do usuário (válidas em qualquer servidor), ordenadas por slot e parte."""
+    """Retorna as embeds do usuário (válidas em qualquer servidor), ordenadas por slot e parte.
+    Cada embed já vem com os seus campos na chave "campos"."""
     _garantir_tabela_embeds()
     session = SessionLocal()
     try:
@@ -387,9 +411,18 @@ def embed_listar(id_usuario: int) -> list[dict]:
             .order_by(EmbedPersonalizado.slot, EmbedPersonalizado.parte)
             .all()
         )
-        return [_embed_para_dict(r) for r in rows]
+        embeds = [_embed_para_dict(r) for r in rows]
     finally:
         session.close()
+
+    campos = campo_listar(id_usuario)
+    for dados in embeds:
+        dados["campos"] = [
+            {chave: c[chave] for chave in CAMPO_CAMPOS}
+            for c in campos
+            if c["slot"] == dados["slot"] and c["parte"] == dados["parte"]
+        ]
+    return embeds
 
 
 def embed_obter(id_usuario: int, slot: int, parte: int = 1) -> dict | None:
@@ -437,7 +470,8 @@ def embed_salvar(id_usuario: int, slot: int, parte: int = 1, **campos) -> dict:
 
 def embed_salvar_slot(id_usuario: int, slot: int, partes: list[dict]) -> list[dict]:
     """Grava o slot inteiro: cada item da lista vira uma parte (1..N) e as partes
-    que sobraram de uma versão anterior maior são apagadas."""
+    que sobraram de uma versão anterior maior são apagadas. Os campos acompanham
+    a parte a que pertencem."""
     _garantir_tabela_embeds()
     for indice, dados in enumerate(partes, start=1):
         embed_salvar(
@@ -445,6 +479,7 @@ def embed_salvar_slot(id_usuario: int, slot: int, partes: list[dict]) -> list[di
             **{campo: dados.get(campo) for campo in EMBED_CAMPOS},
         )
     embed_remover(id_usuario, slot, acima_de=len(partes))
+    campo_salvar_slot(id_usuario, slot, [p.get("campos") or [] for p in partes])
     return [d for d in embed_listar(id_usuario) if d["slot"] == int(slot)]
 
 
@@ -464,9 +499,12 @@ def embed_remover(id_usuario: int, slot: int, parte: int | None = None, acima_de
             consulta = consulta.filter(EmbedPersonalizado.parte > int(acima_de))
         removidas = consulta.delete()
         session.commit()
-        return bool(removidas)
     finally:
         session.close()
+
+    # Os campos são de uma parte, então saem junto com ela
+    campo_remover(id_usuario, slot, parte=parte, acima_de=acima_de)
+    return bool(removidas)
 
 
 def embed_criar(id_usuario: int, **campos) -> dict | None:
@@ -580,6 +618,112 @@ def botao_remover(id_usuario: int, slot: int, posicao: int | None = None) -> boo
         )
         if posicao is not None:
             consulta = consulta.filter(BotaoPersonalizado.posicao == int(posicao))
+        removidos = consulta.delete()
+        session.commit()
+        return bool(removidos)
+    finally:
+        session.close()
+
+
+# Campos editáveis de um campo (field) e teto por embed, imposto pelo Discord.
+CAMPO_CAMPOS = (
+    "nome",
+    "valor",
+    "em_linha",
+)
+CAMPO_LIMITE_POR_EMBED = 25
+
+_tabela_campos_pronta = False
+
+
+def _garantir_tabela_campos():
+    global _tabela_campos_pronta
+    if _tabela_campos_pronta:
+        return
+    CampoPersonalizado.__table__.create(bind=engine, checkfirst=True)
+    _tabela_campos_pronta = True
+
+
+def campo_listar(id_usuario: int) -> list[dict]:
+    """Campos do usuário, ordenados por slot, parte e posição na embed."""
+    _garantir_tabela_campos()
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(CampoPersonalizado)
+            .filter_by(id_usuario=int(id_usuario))
+            .order_by(CampoPersonalizado.slot, CampoPersonalizado.parte, CampoPersonalizado.posicao)
+            .all()
+        )
+        return [
+            {
+                "slot": int(r.slot),
+                "parte": int(r.parte or 1),
+                "posicao": int(r.posicao),
+                # Nome vazio é gravado como string vazia e volta como None, para
+                # bater com o rascunho do painel na comparação de alterações
+                "nome": r.nome or None,
+                "valor": r.valor or None,
+                "em_linha": bool(r.em_linha),
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+def campo_salvar_slot(id_usuario: int, slot: int, campos_por_parte: list[list[dict]]) -> list[dict]:
+    """Grava os campos do slot inteiro: a lista externa é indexada pela parte e a
+    interna pela posição. Como o painel salva o slot de uma vez, o que estava
+    gravado é substituído por completo."""
+    _garantir_tabela_campos()
+    session = SessionLocal()
+    try:
+        session.query(CampoPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        ).delete()
+
+        for parte, campos in enumerate(campos_por_parte, start=1):
+            for posicao, dados in enumerate(campos, start=1):
+                nome = (dados.get("nome") or "").strip()
+                valor = (dados.get("valor") or "").strip()
+                # Campo em branco dos dois lados não mostra nada na embed
+                if not nome and not valor:
+                    continue
+                session.add(CampoPersonalizado(
+                    id_usuario=int(id_usuario),
+                    slot=int(slot),
+                    parte=parte,
+                    posicao=posicao,
+                    # A coluna é NOT NULL: o nome vazio é gravado como string vazia
+                    # e volta como None em campo_listar, igual ao que o painel guarda
+                    nome=nome,
+                    valor=valor or None,
+                    em_linha=bool(dados.get("em_linha")),
+                ))
+
+        session.commit()
+    finally:
+        session.close()
+
+    return [c for c in campo_listar(id_usuario) if c["slot"] == int(slot)]
+
+
+def campo_remover(id_usuario: int, slot: int, parte: int | None = None, acima_de: int | None = None) -> bool:
+    """Apaga os campos do slot, os de uma parte, ou os das partes acima de um
+    limite. Retorna True se havia o que apagar."""
+    _garantir_tabela_campos()
+    session = SessionLocal()
+    try:
+        consulta = session.query(CampoPersonalizado).filter_by(
+            id_usuario=int(id_usuario),
+            slot=int(slot),
+        )
+        if parte is not None:
+            consulta = consulta.filter(CampoPersonalizado.parte == int(parte))
+        if acima_de is not None:
+            consulta = consulta.filter(CampoPersonalizado.parte > int(acima_de))
         removidos = consulta.delete()
         session.commit()
         return bool(removidos)
